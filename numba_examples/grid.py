@@ -54,33 +54,33 @@ class Grid(object):
             figsize = (width * PREFERRED_MAX_FIG_HEIGHT / height, PREFERRED_MAX_FIG_HEIGHT)
         return figsize
 
-    @classmethod
-    def create_from_file(grid_class, grid_file, xy_limits=None, figsize=None):
-        gfile = open(grid_file)
-        grid = grid_class.create_from_str(gfile.read(), xy_limits=xy_limits, figsize=figsize)
-        gfile.close()
-        return grid
-    @classmethod
-    def create_from_str(grid_class, grid_str, xy_limits=None, figsize=None):
-        lines = list(map(str.split, filter(lambda s:not s.startswith('#') and len(s)>0, map(str.strip,grid_str.split('\n')))))
-        num_rows = len(lines)
-        num_cols = len(lines[0])
+    # @classmethod
+    # def create_from_file(grid_class, grid_file, xy_limits=None, figsize=None):
+    #     gfile = open(grid_file)
+    #     grid = grid_class.create_from_str(gfile.read(), xy_limits=xy_limits, figsize=figsize)
+    #     gfile.close()
+    #     return grid
+    # @classmethod
+    # def create_from_str(grid_class, grid_str, xy_limits=None, figsize=None):
+    #     lines = list(map(str.split, filter(lambda s:not s.startswith('#') and len(s)>0, map(str.strip,grid_str.split('\n')))))
+    #     num_rows = len(lines)
+    #     num_cols = len(lines[0])
 
-        for line in lines:
-            if not num_cols == len(line):
-                raise WrongGridFormat
-        grid_array = np.zeros([num_cols,num_rows])
-        for row in range(num_rows):
-            for col in range(num_cols):
-                value = lines[row][col]
-                if not value == '0' and not value =='1':
-                    raise WrongGridFormat
-                grid_array[col,num_rows-1 - row] = value
+    #     for line in lines:
+    #         if not num_cols == len(line):
+    #             raise WrongGridFormat
+    #     grid_array = np.zeros([num_cols,num_rows])
+    #     for row in range(num_rows):
+    #         for col in range(num_cols):
+    #             value = lines[row][col]
+    #             if not value == '0' and not value =='1':
+    #                 raise WrongGridFormat
+    #             grid_array[col,num_rows-1 - row] = value
 
-        grid = grid_class(num_cols, num_rows, xy_limits, figsize)
-        grid.grid_array = grid_array
+    #     grid = grid_class(num_cols, num_rows, xy_limits, figsize)
+    #     grid.grid_array = grid_array
 
-        return grid
+    #     return grid
 
     def add_random_obstacles(self, num_obs):
         """Clear grid and add random obstacles"""
