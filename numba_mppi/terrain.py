@@ -105,6 +105,11 @@ class TDM_Numba(object):
         self.res = None
         self.pmf_grid_initialized = False
 
+        # For variants of MPPI
+        self.use_det_dynamics = None
+        self.det_dynamics_cvar_alpha = None
+        self.use_nom_dynamics_with_speed_map = None
+
         # Initialize batch_sample variables
         self.sample_grid_batch_d = None
         self.rng_states_d = None
@@ -115,7 +120,8 @@ class TDM_Numba(object):
         self.figsize = None
 
     def set_TDM_from_semantic_grid(self, sg, res, num_pmf_bins, bin_values, bin_values_bounds,
-                                  xlimits, ylimits, id2name, name2terrain, terrain2pmf):
+                                  xlimits, ylimits, id2name, name2terrain, terrain2pmf,
+                                  use_det_dynamics=False, det_dynamics_cvar_alpha=None, use_nom_dynamics_with_speed_map=False):
         """
         Save semantic grid and initialize visualization parameters.
         initialize the PMF grid and copy to device. 
@@ -138,18 +144,56 @@ class TDM_Numba(object):
         self.res = res
         assert bin_values[0]==0, "Assume minimum bin value is 0 for now"
         assert bin_values_bounds[0]==0, "Assume minimum traction is 0 for now"
-        
+        assert not (use_det_dynamics and use_nom_dynamics_with_speed_map), \
+            "In 'set_TDM_from_semantic_grid', cannot set both use_det_dynamics and use_nom_dynamics_with_speed_map to True"
+        assert (not use_det_dynamics) or (det_dynamics_cvar_alpha is not None), \
+            "When using deterministic dynamics, det_dynamics_cvar_alpha must be set."
+
+        self.use_det_dynamics = use_det_dynamics
+        self.det_dynamics_cvar_alpha = det_dynamics_cvar_alpha
+        self.use_nom_dynamics_with_speed_map = use_nom_dynamics_with_speed_map
 
         # Initialize pmf grid
         # Account for padding
         self.pmf_grid = np.zeros((self.num_pmf_bins, self.num_rows, self.num_cols), dtype=np.int8)
-        for ri in range(self.num_rows):
-            for ci in range(self.num_cols):
-                terrain = self.id2terrain_fn(self.semantic_grid[ri, ci])
-                values, pmf = self.terrain2pmf[terrain]
-                self.pmf_grid[:, ri, ci] = np.rint(pmf*100).astype(np.int8)
-                # Make sure cum sum is 100
-                self.pmf_grid[-1, ri, ci] = np.int8(100)-np.sum(self.pmf_grid[:-1, ri, ci])
+        
+        if use_det_dynamics:
+            # Use dynamics computed based on cvar_alpha
+            # Use CVaR dynamics (alpha=1 ==> mean dynamics)
+            for ri in range(self.num_rows):
+                for ci in range(self.num_cols):
+                    terrain = self.id2terrain_fn(self.semantic_grid[ri, ci])
+                    values, pmf = self.terrain2pmf[terrain]
+                    cum_sum = 0.0
+                    expected_traction = 0.0
+                    for val, m in zip(values, pmf):
+                        cum_sum += m
+                        expected_traction += m*val
+                        if cum_sum >= det_dynamics_cvar_alpha:
+                            if cum_sum > 0:
+                                expected_traction /= cum_sum
+                            # Find the corresponding bin for the traction
+                            for bin_i, vval in enumerate(values):
+                                if expected_traction <= vval:
+                                    self.pmf_grid[bin_i, ri, ci] = np.int8(100)
+                                    break
+                            break
+                    # assert sum(self.pmf_grid[:,ri, ci])==100
+            
+        elif use_nom_dynamics_with_speed_map:
+            # Set PMF to have 1 in the last bin
+            self.pmf_grid[-1,:,:] = np.int8(100)
+
+        else:
+
+            # Stochastic dynamics
+            for ri in range(self.num_rows):
+                for ci in range(self.num_cols):
+                    terrain = self.id2terrain_fn(self.semantic_grid[ri, ci])
+                    values, pmf = self.terrain2pmf[terrain]
+                    self.pmf_grid[:, ri, ci] = np.rint(pmf*100).astype(np.int8)
+                    # # Make sure cum sum is 100
+                    # self.pmf_grid[-1, ri, ci] = np.int8(100)-np.sum(self.pmf_grid[:-1, ri, ci])
         
         padded_pmf_grid, padded_xlimits, padded_ylimits = self.set_padding(self.pmf_grid, self.max_speed, self.dt, res,
                                                             xlimits, ylimits)
@@ -162,34 +206,34 @@ class TDM_Numba(object):
         self.pmf_grid_initialized = True
 
         
-    def set_TDM_from_PMF_grid(self, pmf_grid, res, xlimits, ylimits, bin_values, bin_values_bounds):
-        # TODO: make sure parameters are all set properly
+    # def set_TDM_from_PMF_grid(self, pmf_grid, res, xlimits, ylimits, bin_values, bin_values_bounds):
+    #     # TODO: make sure parameters are all set properly
 
 
-        assert len(pmf_grid.shape)==3, "PMF grid must have 3 dimensions"
-        self.num_pmf_bins, self.num_rows, self.num_cols = pmf_grid.shape
-        self.cell_dimensions = (res, res)
-        self.xlimits = xlimits
-        self.ylimits = ylimits
+    #     assert len(pmf_grid.shape)==3, "PMF grid must have 3 dimensions"
+    #     self.num_pmf_bins, self.num_rows, self.num_cols = pmf_grid.shape
+    #     self.cell_dimensions = (res, res)
+    #     self.xlimits = xlimits
+    #     self.ylimits = ylimits
 
-        self.pmf_grid = np.asarray(pmf_grid).astype(np.int8)
-        self.bin_values = np.asarray(bin_values).astype(np.float32)
-        self.bin_values_bounds = np.asarray(bin_values_bounds).astype(np.float32)
-        assert bin_values[0]==0, "Assume minimum bin value is 0 for now"
-        assert bin_values_bounds[0]==0, "Assume minimum traction is 0 for now"
-        # self.pmf_grid_d = cuda.to_device(self.pmf_grid)
-        self.bin_values_d = cuda.to_device(bin_values)
-        self.bin_values_bounds_d = cuda.to_device(bin_values_bounds)
-        self.res = res
+    #     self.pmf_grid = np.asarray(pmf_grid).astype(np.int8)
+    #     self.bin_values = np.asarray(bin_values).astype(np.float32)
+    #     self.bin_values_bounds = np.asarray(bin_values_bounds).astype(np.float32)
+    #     assert bin_values[0]==0, "Assume minimum bin value is 0 for now"
+    #     assert bin_values_bounds[0]==0, "Assume minimum traction is 0 for now"
+    #     # self.pmf_grid_d = cuda.to_device(self.pmf_grid)
+    #     self.bin_values_d = cuda.to_device(bin_values)
+    #     self.bin_values_bounds_d = cuda.to_device(bin_values_bounds)
+    #     self.res = res
 
-        padded_pmf_grid, padded_xlimits, padded_ylimits = self.set_padding(self.pmf_grid, self.max_speed, self.dt, res,
-                                                            xlimits, ylimits)
+    #     padded_pmf_grid, padded_xlimits, padded_ylimits = self.set_padding(self.pmf_grid, self.max_speed, self.dt, res,
+    #                                                         xlimits, ylimits)
 
-        self.pmf_grid_d = cuda.to_device(padded_pmf_grid)
-        self.padded_xlimits = padded_xlimits
-        self.padded_ylimits = padded_ylimits
-        _, self.padded_num_rows, self.padded_num_cols = padded_pmf_grid.shape
-        self.pmf_grid_initialized = True 
+    #     self.pmf_grid_d = cuda.to_device(padded_pmf_grid)
+    #     self.padded_xlimits = padded_xlimits
+    #     self.padded_ylimits = padded_ylimits
+    #     _, self.padded_num_rows, self.padded_num_cols = padded_pmf_grid.shape
+    #     self.pmf_grid_initialized = True 
 
         
 
@@ -209,12 +253,17 @@ class TDM_Numba(object):
         return padded_pmf_grid, padded_xlimits, padded_ylimits
 
 
-    def init_device_vars_before_sampling(self, seed=1):
+    def init_device_vars_before_sampling(self, det_dyn=False, seed=1):
         # num_samples = number of grids
         if not self.device_var_initialized:
             _, rows, cols = self.pmf_grid_d.shape
-            self.rng_states_d = create_xoroshiro128p_states(self.TOTAL_THREADS, seed=seed)
-            self.sample_grid_batch_d = cuda.device_array((self.NUM_GRID_SAMPLES, rows, cols), dtype=np.int8)
+            if not det_dyn:
+                self.rng_states_d = create_xoroshiro128p_states(self.TOTAL_THREADS, seed=seed)
+                self.sample_grid_batch_d = cuda.device_array((self.NUM_GRID_SAMPLES, rows, cols), dtype=np.int8)
+            else:
+                self.rng_states_d = create_xoroshiro128p_states(self.THREAD_DIM[0]*self.THREAD_DIM[1], seed=seed)
+                self.sample_grid_batch_d = cuda.device_array((1, rows, cols), dtype=np.int8)
+
             self.device_var_initialized = True
     
     def sample_grids_true_dist(self):
@@ -241,12 +290,18 @@ class TDM_Numba(object):
 
         return TractionGrid(lins, angs)
 
-    def sample_grids(self):
+    def sample_grids(self, det_dyn=False):
         # Invoke the GPU kernels to sample from the PMF approximation
-        self.sample_grids_numba[self.BLOCK_DIM, self.THREAD_DIM](
-            self.sample_grid_batch_d, self.pmf_grid_d, self.rng_states_d,
-            self.bin_values_d, self.bin_values_bounds_d
-        )
+        if not det_dyn:
+            self.sample_grids_numba[self.BLOCK_DIM, self.THREAD_DIM](
+                self.sample_grid_batch_d, self.pmf_grid_d, self.rng_states_d,
+                self.bin_values_d, self.bin_values_bounds_d
+            )
+        else:
+            self.sample_grids_numba[(1,1), self.THREAD_DIM](
+                self.sample_grid_batch_d, self.pmf_grid_d, self.rng_states_d,
+                self.bin_values_d, self.bin_values_bounds_d
+            )
         return self.sample_grid_batch_d
 
 
