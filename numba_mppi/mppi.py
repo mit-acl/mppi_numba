@@ -104,6 +104,85 @@ class MPPI_Numba(object):
     else:
       return self.solve_stochastic()
 
+
+  def solve_nom_dyn_w_speed_map(self):
+    assert self.params_set, "MPPI parameters are not set"
+    assert self.tdm_set, "MPPI has not received TDMs"
+
+    if not self.device_var_initialized:
+      print("Device variables not initialized. Cannot run mppi.")
+      return
+    
+    # Move things to GPU
+    res_d = np.float32(self.lin_tdm.res) # no need to move int
+    xlimits_d = cuda.to_device(self.lin_tdm.padded_xlimits.astype(np.float32))
+    ylimits_d = cuda.to_device(self.lin_tdm.padded_ylimits.astype(np.float32))
+    vrange_d = cuda.to_device(self.params['vrange'].astype(np.float32))
+    wrange_d = cuda.to_device(self.params['wrange'].astype(np.float32))
+    xgoal_d = cuda.to_device(self.params['xgoal'].astype(np.float32))
+    v_post_rollout_d = np.float32(self.params['v_post_rollout'])
+    goal_tolerance_d = np.float32(self.params['goal_tolerance'])
+    lambda_weight_d = np.float32(self.params['lambda_weight'])
+    u_std_d = cuda.to_device(self.params['u_std'].astype(np.float32))
+    cvar_alpha_d = np.float32(self.params['cvar_alpha'])
+    x0_d = cuda.to_device(self.params['x0'].astype(np.float32))
+    dt_d = np.float32(self.params['dt'])
+    
+    
+    # Sample environment realizations for estimating cvar
+    self.lin_tdm.init_device_vars_before_sampling(det_dyn=True)
+    self.ang_tdm.init_device_vars_before_sampling(det_dyn=True)
+    # lin_sample_grid_batch_d = self.lin_tdm.sample_grids(det_dyn=True) # get ref to device samples
+    # ang_sample_grid_batch_d = self.ang_tdm.sample_grids(det_dyn=True) # get ref to device samples
+
+    # Optimization loop
+    for k in range(self.params['num_opt']):
+      # Sample control noise
+      self.sample_noise_numba[cfg.num_control_rollouts, cfg.num_steps](
+            self.rng_states_d, u_std_d, self.noise_samples_d)
+      
+      # Rollout and compute mean or cvar
+      self.rollout_det_dyn_w_speed_map_numba[cfg.num_control_rollouts, 1](
+        # lin_sample_grid_batch_d,
+        # ang_sample_grid_batch_d,
+        self.lin_tdm.risk_traction_map_d,
+        # self.ang_tdm.risk_traction_map_d,
+        self.lin_tdm.bin_values_bounds_d,
+        self.ang_tdm.bin_values_bounds_d,
+        res_d,
+        xlimits_d,
+        ylimits_d,
+        vrange_d,
+        wrange_d,
+        xgoal_d,
+        v_post_rollout_d,
+        goal_tolerance_d,
+        lambda_weight_d,
+        u_std_d,
+        # cvar_alpha_d,
+        x0_d,
+        dt_d,
+        self.noise_samples_d,
+        self.u_cur_d,
+        # results
+        self.costs_d
+      )
+
+      # Compute cost and update the optimal control on device
+      self.update_useq_numba[1, 32](
+        lambda_weight_d, 
+        self.costs_d, 
+        self.noise_samples_d, 
+        self.weights_d, 
+        vrange_d,
+        wrange_d,
+        self.u_cur_d
+      )
+
+    # Full control sequence copied from GPU
+    return self.u_cur_d.copy_to_host()
+
+
   def solve_det_dyn(self):
     assert self.params_set, "MPPI parameters are not set"
     assert self.tdm_set, "MPPI has not received TDMs"
@@ -541,6 +620,93 @@ class MPPI_Numba(object):
 
       # Accumulate cost starting at the initial state
       costs_d[bid]+=dt_d
+      if not goal_reached:
+        dist_to_goal2 = (xgoal_d[0]-x_curr[0])**2 + (xgoal_d[1]-x_curr[1])**2
+        if dist_to_goal2<= goal_tolerance_d2:
+          goal_reached = True
+          break
+      
+    # Accumulate terminal cost 
+    if not goal_reached:
+      costs_d[bid] += math.sqrt(dist_to_goal2)/v_post_rollout_d
+
+    # Accumulate the missing stage cost
+    for t in range(timesteps):
+      costs_d[bid] += lambda_weight_d*(
+              (u_cur_d[t,0]/(u_std_d[0]**2))*noise_samples_d[bid, t,0] + (u_cur_d[t,1]/(u_std_d[1]**2))*noise_samples_d[bid, t, 1])
+
+
+  @staticmethod
+  @cuda.jit(fastmath=True)
+  def rollout_det_dyn_w_speed_map_numba(
+          #lin_sample_grid_batch_d,
+          #ang_sample_grid_batch_d,
+          lin_risk_traction_map_d,
+          #ang_risk_traction_map_d,
+          lin_bin_values_bounds_d,
+          ang_bin_values_bounds_d,
+          res_d, 
+          xlimits_d,
+          ylimits_d,
+          vrange_d, 
+          wrange_d, 
+          xgoal_d, 
+          v_post_rollout_d, 
+          goal_tolerance_d, 
+          lambda_weight_d, 
+          u_std_d, 
+          # cvar_alpha_d, # not used
+          x0_d, 
+          dt_d,
+          noise_samples_d,
+          u_cur_d,
+          costs_d):
+    """
+    Every thread in each block considers different traction grids but the same control sequence.
+    Each block produces a single result (reduce a shared list to produce CVaR or mean. Is there a more efficient way to do this?)
+    """
+    # Get block id and thread id
+    bid = cuda.blockIdx.x   # index of block
+    tid = cuda.threadIdx.x  # index of thread within a block
+    costs_d[bid] = 0.0
+
+    # Explicit unicycle update and map lookup
+    # From here on we assume grid is properly padded so map lookup remains valid
+    # height, width = lin_sample_grid_batch_d[tid].shape
+    height, width = lin_risk_traction_map_d[0].shape
+    x_curr = cuda.local.array(3, numba.float32)
+    for i in range(3): 
+      x_curr[i] = x0_d[i]
+
+    timesteps = len(u_cur_d)
+    goal_reached = False
+    goal_tolerance_d2 = goal_tolerance_d*goal_tolerance_d
+    dist_to_goal2 = 1e9
+    v_nom =v_noisy = w_nom = w_noisy = 0.0
+
+    lin_ratio = 0.01*(lin_bin_values_bounds_d[1]-lin_bin_values_bounds_d[0])
+    ang_ratio = 0.01*(ang_bin_values_bounds_d[1]-ang_bin_values_bounds_d[0])
+
+    for t in range(timesteps):
+      # Look up the traction parameters from map
+      xi = numba.int32((x_curr[0]-xlimits_d[0])//res_d)
+      yi = numba.int32((x_curr[1]-ylimits_d[0])//res_d)
+
+      # Nominal noisy control
+      v_nom = u_cur_d[t, 0] + noise_samples_d[bid, t, 0]
+      w_nom = u_cur_d[t, 1] + noise_samples_d[bid, t, 1]
+      v_noisy = max(vrange_d[0], min(vrange_d[1], v_nom))
+      w_noisy = max(wrange_d[0], min(wrange_d[1], w_nom))
+      
+      # Forward simulate
+      x_curr[0] += dt_d*v_noisy*math.cos(x_curr[2])
+      x_curr[1] += dt_d*v_noisy*math.sin(x_curr[2])
+      x_curr[2] += dt_d*w_noisy
+
+      # Accumulate (risk-speed adjusted) cost starting at the initial state
+      vtraction = lin_bin_values_bounds_d[0] + (lin_bin_values_bounds_d[0]+lin_ratio*lin_risk_traction_map_d[0, yi, xi])
+      costs_d[bid]+=(dt_d/(vtraction+1e-3)) # avoid div by 0
+
       if not goal_reached:
         dist_to_goal2 = (xgoal_d[0]-x_curr[0])**2 + (xgoal_d[1]-x_curr[1])**2
         if dist_to_goal2<= goal_tolerance_d2:

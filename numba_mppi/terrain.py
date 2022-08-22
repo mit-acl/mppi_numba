@@ -112,6 +112,7 @@ class TDM_Numba(object):
 
         # Initialize batch_sample variables
         self.sample_grid_batch_d = None
+        self.risk_traction_map_d = None # for adjusting time cost
         self.rng_states_d = None
         self.device_var_initialized = False
 
@@ -183,6 +184,26 @@ class TDM_Numba(object):
         elif use_nom_dynamics_with_speed_map:
             # Set PMF to have 1 in the last bin
             self.pmf_grid[-1,:,:] = np.int8(100)
+
+            # Generate the risk speed map (CVaR)
+            risk_traction_map = np.zeros((1, self.num_rows, self.num_cols), dtype=np.int8)
+            traction_range = self.bin_values_bounds[1] - self.bin_values_bounds[0]
+            for ri in range(self.num_rows):
+                for ci in range(self.num_cols):
+                    terrain = self.id2terrain_fn(self.semantic_grid[ri, ci])
+                    values, pmf = self.terrain2pmf[terrain]
+                    cum_sum = 0.0
+                    expected_traction = 0.0
+                    for val, m in zip(values, pmf):
+                        cum_sum += m
+                        expected_traction += m*val
+                        if cum_sum >= det_dynamics_cvar_alpha:
+                            if cum_sum > 0:
+                                expected_traction /= cum_sum
+                            risk_traction_map[0, ri, ci] = np.int8(100*(expected_traction-self.bin_values_bounds[0])/traction_range)
+                            break
+
+            self.risk_traction_map_d = cuda.to_device(risk_traction_map)
 
         else:
 
