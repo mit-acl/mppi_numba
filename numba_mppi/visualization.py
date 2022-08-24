@@ -120,11 +120,12 @@ class TDM_Visualizer(object):
     
 
 
-def vis_density(ax, density, terrain, vis_cvar_alpha, color='b', title=None, hist_alpha=0.5):
+def vis_density(ax, density, terrain, vis_cvar_alpha, show_cvar=False, color='b', title=None, hist_alpha=0.5):
     cvar, thres = density.cvar(alpha=vis_cvar_alpha)
     if density.sample_initialized:
         ax.hist(density.samples, bins=100, density=True, color=color, alpha=hist_alpha, label=terrain.name)
-    ax.plot([thres, thres], [0,5], 'k--', label='{}-th Percentile'.format(int(vis_cvar_alpha*100.0)),
+    if show_cvar:
+        ax.plot([thres, thres], [0,5], 'k--', label='{}-th Percentile'.format(int(vis_cvar_alpha*100.0)),
            linewidth=2)
     if density.sample_bounds is not None:
         ax.set_xlim(density.sample_bounds)
@@ -132,7 +133,7 @@ def vis_density(ax, density, terrain, vis_cvar_alpha, color='b', title=None, his
         ax.set_title(title)
         
         
-    ax.set_xlabel("Speed (m/s)")
+    ax.set_xlabel("Traction")
     ax.set_ylabel("Density")
         
     ax.legend()
@@ -148,8 +149,8 @@ def vis_density_as_pmf(ax, density, terrain, num_bins, include_min_max=True, col
         ax.set_xlim(density.pmf_bounds)
     if title is not None:
         ax.set_title(title)
-    ax.set_xlabel("Speed (m/s)")
-    ax.set_ylabel("Density")
+    ax.set_xlabel("Traction")
+    ax.set_ylabel("PMF")
     ax.legend()
     return ax
 
