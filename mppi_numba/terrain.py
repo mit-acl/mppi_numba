@@ -8,7 +8,7 @@ from numba.cuda.random import create_xoroshiro128p_states, xoroshiro128p_uniform
 
 
 # TODO: import the control configurations from a config file?
-from config import Config
+from .config import Config
 cfg = Config()
 
 # Terrain type has linear and angular traction parameters
@@ -68,10 +68,10 @@ class TDM_Numba(object):
     THREAD_DIM = cfg.tdm_sample_thread_dim
     TOTAL_THREADS = NUM_GRID_SAMPLES*THREAD_DIM[0]*THREAD_DIM[1]
 
-    def __init__(self, max_speed, dt=cfg.dt):
+    def __init__(self, max_speed_padding=cfg.max_speed_padding, dt=cfg.dt):
 
         # Used for padding 0 traction regions around the map
-        self.max_speed = max_speed
+        self.max_speed_padding = max_speed_padding
         self.dt = dt
         self.num_cells_to_pad = None
 
@@ -124,6 +124,7 @@ class TDM_Numba(object):
                                   xlimits, ylimits, id2name, name2terrain, terrain2pmf,
                                   use_det_dynamics=False, det_dynamics_cvar_alpha=None, use_nom_dynamics_with_speed_map=False):
         """
+        Mainly used for simulation benchmark where semantics and their ground truth properties are known.
         Save semantic grid and initialize visualization parameters.
         initialize the PMF grid and copy to device. 
         Return: (pmf_grid, pmf_grid_d)
@@ -216,7 +217,7 @@ class TDM_Numba(object):
                     # # Make sure cum sum is 100
                     # self.pmf_grid[-1, ri, ci] = np.int8(100)-np.sum(self.pmf_grid[:-1, ri, ci])
         
-        padded_pmf_grid, padded_xlimits, padded_ylimits = self.set_padding(self.pmf_grid, self.max_speed, self.dt, res,
+        padded_pmf_grid, padded_xlimits, padded_ylimits = self.set_padding(self.pmf_grid, self.max_speed_padding, self.dt, res,
                                                             xlimits, ylimits)
         self.pmf_grid_d = cuda.to_device(padded_pmf_grid)
         self.padded_xlimits = padded_xlimits
@@ -225,6 +226,20 @@ class TDM_Numba(object):
         self.bin_values_d = cuda.to_device(bin_values)
         self.bin_values_bounds_d = cuda.to_device(bin_values_bounds)
         self.pmf_grid_initialized = True
+
+
+    def set_TDM_from_costmap(self, costmap_dict):
+        assert costmap_dict["use_costmap"]
+        if "costmap" in costmap_dict:
+            print("Got costmap of dimension {} with unique values of {}".format(costmap_dict["costmap"].shape, set(costmap_dict["costmap"].flatten())))
+
+        # print("Received costmap array and configs: {}".format(costmap_dict))
+        # TODO: make sure samples can be taken based on the costmap
+        # TODO: if we are only using costmap, we use nominal dynamics and risk-adjusted time-cost
+
+
+
+
 
         
     # def set_TDM_from_PMF_grid(self, pmf_grid, res, xlimits, ylimits, bin_values, bin_values_bounds):
@@ -258,10 +273,10 @@ class TDM_Numba(object):
 
         
 
-    def set_padding(self, pmf_grid, max_speed, dt, res, xlimits, ylimits):
+    def set_padding(self, pmf_grid, max_speed_padding, dt, res, xlimits, ylimits):
         # Padd the nominal pmf grid with 0_traction components (assumed to be the first bin values)
         _, original_height, original_width = pmf_grid.shape
-        self.pad_width = pad_width = int(np.ceil(max_speed*dt/res))
+        self.pad_width = pad_width = int(np.ceil(max_speed_padding*dt/res))
         self.padded_num_cols = self.num_cols+2*pad_width
         self.padded_num_rows = self.num_rows+2*pad_width
         padded_xlimits = np.array([xlimits[0]-pad_width*res, xlimits[0]+pad_width*res])

@@ -8,7 +8,7 @@ from numba.cuda.random import create_xoroshiro128p_states, xoroshiro128p_uniform
 
 
 # TODO: import the control configurations from a config file?
-from config import Config
+from .config import Config
 cfg = Config()
 NUM_GRID_SAMPLES = cfg.num_grid_samples # Has to be a constant when used in kernel (cannot be class property)
 NUM_STEPS = cfg.num_steps
@@ -337,6 +337,10 @@ class MPPI_Numba(object):
   def shift_and_update(self, new_x0, u_cur, num_shifts=1):
     self.params["x0"] = new_x0.copy()
     # shift the optimal control sequence via
+    self.shift_optimal_control_sequence(u_cur, num_shifts)
+
+  def shift_optimal_control_sequence(self, u_cur, num_shifts=1):
+    # shift the optimal control sequence
     u_cur_shifted = u_cur.copy()
     u_cur_shifted[:-num_shifts] = u_cur_shifted[num_shifts:]
     self.u_cur_d = cuda.to_device(u_cur_shifted.astype(np.float32))
