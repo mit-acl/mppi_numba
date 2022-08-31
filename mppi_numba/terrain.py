@@ -172,6 +172,7 @@ class TDM_Numba(object):
         # Account for padding
         self.pmf_grid = np.zeros((self.num_pmf_bins, self.num_rows, self.num_cols), dtype=np.int8)
         
+        # TODO: For loop is slow, use masking? 
         if self.use_det_dynamics:
             # Use dynamics computed based on cvar_alpha
             # Use CVaR dynamics (alpha=1 ==> mean dynamics)
@@ -195,6 +196,7 @@ class TDM_Numba(object):
                             break
                     # assert sum(self.pmf_grid[:,ri, ci])==100
             
+        # TODO: For loop is slow, use masking? 
         elif self.use_nom_dynamics_with_speed_map:
             # Set PMF to have 1 in the last bin
             self.pmf_grid[-1,:,:] = np.int8(100)
@@ -263,9 +265,9 @@ class TDM_Numba(object):
         self.ylimits = costmap_dict["ylimits"]
 
         self.num_rows, self.num_cols = costmap_dict["costmap"].shape
-        self.num_pmf_bins = costmap_dict["num_pmf_bins"]
-        self.bin_values = costmap_dict["bin_values"].astype(np.float32)
-        self.bin_values_bounds = costmap_dict["bin_values_bounds"].astype(np.float32)
+        self.num_pmf_bins = 2 # costmap_dict["num_pmf_bins"]
+        self.bin_values = np.array([0.0, 1.0], dtype=np.float32) # costmap_dict["bin_values"].astype(np.float32)
+        self.bin_values_bounds = np.array([min(self.bin_values), max(self.bin_values)], dtype=np.float32) # costmap_dict["bin_values_bounds"].astype(np.float32)
         # print(self.num_rows, self.num_pmf_bins, self.bin_values, self.bin_values_bounds)
 
         # Default to using nominal dynamics and risk-adjusted time cost
@@ -315,34 +317,34 @@ class TDM_Numba(object):
 
 
         
-    # def set_TDM_from_PMF_grid(self, pmf_grid, res, xlimits, ylimits, bin_values, bin_values_bounds):
-    #     # TODO: make sure parameters are all set properly
+    def set_TDM_from_PMF_grid(self, pmf_grid, tdm_dict):
+        # TODO: make sure parameters are all set properly
 
+        assert len(pmf_grid.shape)==3, "PMF grid must have 3 dimensions"
+        self.num_pmf_bins, self.num_rows, self.num_cols = pmf_grid.shape
+        self.res = res = tdm_dict["res"]
+        self.cell_dimensions = (res, res)
+        self.xlimits = tdm_dict["xlimits"]
+        self.ylimits = tdm_dict["ylimits"]
 
-    #     assert len(pmf_grid.shape)==3, "PMF grid must have 3 dimensions"
-    #     self.num_pmf_bins, self.num_rows, self.num_cols = pmf_grid.shape
-    #     self.cell_dimensions = (res, res)
-    #     self.xlimits = xlimits
-    #     self.ylimits = ylimits
+        self.pmf_grid = np.asarray(pmf_grid).astype(np.int8)
+        self.bin_values = np.asarray(tdm_dict["bin_values"]).astype(np.float32)
+        self.bin_values_bounds = np.asarray(tdm_dict["bin_values_bounds"]).astype(np.float32)
+        assert self.bin_values[0]==0, "Assume minimum bin value is 0 for now"
+        assert self.bin_values_bounds[0]==0, "Assume minimum traction is 0 for now"
+        # self.pmf_grid_d = cuda.to_device(self.pmf_grid)
+        self.bin_values_d = cuda.to_device(self.bin_values)
+        self.bin_values_bounds_d = cuda.to_device(self.bin_values_bounds)
 
-    #     self.pmf_grid = np.asarray(pmf_grid).astype(np.int8)
-    #     self.bin_values = np.asarray(bin_values).astype(np.float32)
-    #     self.bin_values_bounds = np.asarray(bin_values_bounds).astype(np.float32)
-    #     assert bin_values[0]==0, "Assume minimum bin value is 0 for now"
-    #     assert bin_values_bounds[0]==0, "Assume minimum traction is 0 for now"
-    #     # self.pmf_grid_d = cuda.to_device(self.pmf_grid)
-    #     self.bin_values_d = cuda.to_device(bin_values)
-    #     self.bin_values_bounds_d = cuda.to_device(bin_values_bounds)
-    #     self.res = res
-
-    #     padded_pmf_grid, padded_xlimits, padded_ylimits = self.set_padding(self.pmf_grid, self.max_speed, self.dt, res,
-    #                                                         xlimits, ylimits)
-
-    #     self.pmf_grid_d = cuda.to_device(padded_pmf_grid)
-    #     self.padded_xlimits = padded_xlimits
-    #     self.padded_ylimits = padded_ylimits
-    #     _, self.padded_num_rows, self.padded_num_cols = padded_pmf_grid.shape
-    #     self.pmf_grid_initialized = True 
+        padded_pmf_grid, padded_xlimits, padded_ylimits = self.set_padding(self.pmf_grid, self.max_speed_padding, self.dt, res,
+                                                            self.xlimits, self.ylimits)
+        self.pmf_grid_d = cuda.to_device(padded_pmf_grid)
+        self.padded_xlimits = padded_xlimits
+        self.padded_ylimits = padded_ylimits
+        _, self.padded_num_cols, self.padded_num_rows = padded_pmf_grid.shape
+        self.bin_values_d = cuda.to_device(self.bin_values)
+        self.bin_values_bounds_d = cuda.to_device(self.bin_values_bounds)
+        self.pmf_grid_initialized = True
 
         
 
@@ -439,6 +441,11 @@ class TDM_Numba(object):
         # Every thread takes care of a small section of the grid
         # Return a reference to sampled grids on GPU
 
+        # TODO      
+        # TODO: handle values that are negative and keep them as negative
+        # TODO      
+
+
         threads_x = cuda.blockDim.x # row
         threads_y = cuda.blockDim.y # col
         blocks_x = cuda.gridDim.x # row
@@ -476,9 +483,61 @@ class TDM_Numba(object):
                     if sampled_cum_pmf <= cum_pmf:
                         grid_batch_d[block_id, ri, ci] = np.int8(100.*(bin_values_d[bi]-bin_values_bounds_d[0])/traction_range)
                         if grid_batch_d[block_id, ri, ci]<0:
-                            print("<0")
+                            print("TDM sample_grids_numba experiences values < 0")
                         break
         cuda.syncthreads()
+
+
+
+    # @staticmethod
+    # @cuda.jit(fastmath=True)
+    # def sample_grids_numba(grid_batch_d, pmf_grid_d, rng_states_d,
+    #                  bin_values_d, bin_values_bounds_d):
+    #     # Each 2D block samples a single grid
+    #     # Only consider a single row of block (1, num_blocks)
+    #     # Every thread takes care of a small section of the grid
+    #     # Return a reference to sampled grids on GPU
+
+    #     threads_x = cuda.blockDim.x # row
+    #     threads_y = cuda.blockDim.y # col
+    #     blocks_x = cuda.gridDim.x # row
+    #     blocks_y = cuda.gridDim.y # col
+    #     num_bins, grid_rows, grid_cols = pmf_grid_d.shape
+    #     num_col_entries_per_thread = math.ceil(grid_cols/threads_y)
+    #     num_rows_entries_per_thread = math.ceil(grid_rows/threads_x)
+        
+    #     # thread info
+    #     block_id = cuda.blockIdx.y#
+    #     tid_x = cuda.threadIdx.x # index within block
+    #     tid_y = cuda.threadIdx.y # index within block
+    #     abs_tid_x, abs_tid_y = cuda.grid(2) # absolute x, y index
+    #     thread_id = abs_tid_x*threads_y*blocks_y + abs_tid_y
+    #     # print(thread_id)
+    #     # cuda.syncthreads()
+
+    #     # Compute horizontal and vertical index range
+    #     ri_start = min(tid_x*num_rows_entries_per_thread, grid_rows)
+    #     ri_end = min(ri_start+num_rows_entries_per_thread, grid_rows)
+    #     ci_start = min(tid_y*num_col_entries_per_thread, grid_cols)
+    #     ci_end = min(ci_start+num_col_entries_per_thread, grid_cols)
+
+    #     traction_range = bin_values_bounds_d[1]-bin_values_bounds_d[0]
+    #     cum_pmf = np.int8(0)
+    #     sampled_cum_pmf = np.int8(8)
+    #     for ri in range(ri_start, ri_end):
+    #         for ci in range(ci_start, ci_end):
+    #             # Check which bin this belongs to
+    #             rand_num = xoroshiro128p_uniform_float32(rng_states_d, thread_id)
+    #             sampled_cum_pmf = rand_num*100.0
+    #             cum_pmf = 0
+    #             for bi in range(num_bins):
+    #                 cum_pmf += pmf_grid_d[bi, ri, ci]
+    #                 if sampled_cum_pmf <= cum_pmf:
+    #                     grid_batch_d[block_id, ri, ci] = np.int8(100.*(bin_values_d[bi]-bin_values_bounds_d[0])/traction_range)
+    #                     if grid_batch_d[block_id, ri, ci]<0:
+    #                         print("TDM sample_grids_numba experiences values < 0")
+    #                     break
+    #     cuda.syncthreads()
 
 
 
