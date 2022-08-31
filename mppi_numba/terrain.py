@@ -1,6 +1,7 @@
 
 #!/usr/bin/env python3
 import numpy as np
+import time
 import math
 import numba
 from numba import cuda
@@ -68,7 +69,9 @@ class TDM_Numba(object):
     THREAD_DIM = cfg.tdm_sample_thread_dim
     TOTAL_THREADS = NUM_GRID_SAMPLES*THREAD_DIM[0]*THREAD_DIM[1]
 
-    def __init__(self, max_speed_padding=cfg.max_speed_padding, dt=cfg.dt):
+    def __init__(self, max_speed_padding=cfg.max_speed_padding, dt=cfg.dt, seed=1,
+                use_det_dynamics=False,
+                use_nom_dynamics_with_speed_map=False):
 
         # Used for padding 0 traction regions around the map
         self.max_speed_padding = max_speed_padding
@@ -106,9 +109,9 @@ class TDM_Numba(object):
         self.pmf_grid_initialized = False
 
         # For variants of MPPI
-        self.use_det_dynamics = None
+        self.use_det_dynamics = use_det_dynamics
+        self.use_nom_dynamics_with_speed_map = use_nom_dynamics_with_speed_map
         self.det_dynamics_cvar_alpha = None
-        self.use_nom_dynamics_with_speed_map = None
 
         # Initialize batch_sample variables
         self.sample_grid_batch_d = None
@@ -120,9 +123,19 @@ class TDM_Numba(object):
         self.cell_dimensions = None
         self.figsize = None
 
+
+        # Initialize the random seeds before hand. Somehow initialization later will freeze ros code.
+        self.det_dyn = (self.use_det_dynamics or self.use_nom_dynamics_with_speed_map)
+        if not self.det_dyn:
+            self.rng_states_d = create_xoroshiro128p_states(self.TOTAL_THREADS, seed=seed)
+        else:
+            self.rng_states_d = create_xoroshiro128p_states(self.THREAD_DIM[0]*self.THREAD_DIM[1], seed=seed)
+
+
     def set_TDM_from_semantic_grid(self, sg, res, num_pmf_bins, bin_values, bin_values_bounds,
                                   xlimits, ylimits, id2name, name2terrain, terrain2pmf,
-                                  use_det_dynamics=False, det_dynamics_cvar_alpha=None, use_nom_dynamics_with_speed_map=False):
+                                #   use_det_dynamics=False, det_dynamics_cvar_alpha=None, use_nom_dynamics_with_speed_map=False):
+                                  det_dynamics_cvar_alpha=None):
         """
         Mainly used for simulation benchmark where semantics and their ground truth properties are known.
         Save semantic grid and initialize visualization parameters.
@@ -146,20 +159,20 @@ class TDM_Numba(object):
         self.res = res
         assert bin_values[0]==0, "Assume minimum bin value is 0 for now"
         assert bin_values_bounds[0]==0, "Assume minimum traction is 0 for now"
-        assert not (use_det_dynamics and use_nom_dynamics_with_speed_map), \
-            "In 'set_TDM_from_semantic_grid', cannot set both use_det_dynamics and use_nom_dynamics_with_speed_map to True"
-        assert (not use_det_dynamics) or (det_dynamics_cvar_alpha is not None), \
-            "When using deterministic dynamics, det_dynamics_cvar_alpha must be set."
+        # assert not (use_det_dynamics and use_nom_dynamics_with_speed_map), \
+        #     "In 'set_TDM_from_semantic_grid', cannot set both use_det_dynamics and use_nom_dynamics_with_speed_map to True"
+        # assert (not use_det_dynamics) or (det_dynamics_cvar_alpha is not None), \
+        #     "When using deterministic dynamics, det_dynamics_cvar_alpha must be set."
 
-        self.use_det_dynamics = use_det_dynamics
+        # self.use_det_dynamics = use_det_dynamics
         self.det_dynamics_cvar_alpha = det_dynamics_cvar_alpha
-        self.use_nom_dynamics_with_speed_map = use_nom_dynamics_with_speed_map
+        # self.use_nom_dynamics_with_speed_map = use_nom_dynamics_with_speed_map
 
         # Initialize pmf grid
         # Account for padding
         self.pmf_grid = np.zeros((self.num_pmf_bins, self.num_rows, self.num_cols), dtype=np.int8)
         
-        if use_det_dynamics:
+        if self.use_det_dynamics:
             # Use dynamics computed based on cvar_alpha
             # Use CVaR dynamics (alpha=1 ==> mean dynamics)
             for ri in range(self.num_rows):
@@ -182,7 +195,7 @@ class TDM_Numba(object):
                             break
                     # assert sum(self.pmf_grid[:,ri, ci])==100
             
-        elif use_nom_dynamics_with_speed_map:
+        elif self.use_nom_dynamics_with_speed_map:
             # Set PMF to have 1 in the last bin
             self.pmf_grid[-1,:,:] = np.int8(100)
 
@@ -227,17 +240,77 @@ class TDM_Numba(object):
         self.bin_values_bounds_d = cuda.to_device(bin_values_bounds)
         self.pmf_grid_initialized = True
 
-
+    
     def set_TDM_from_costmap(self, costmap_dict):
-        assert costmap_dict["use_costmap"]
-        if "costmap" in costmap_dict:
-            print("Got costmap of dimension {} with unique values of {}".format(costmap_dict["costmap"].shape, set(costmap_dict["costmap"].flatten())))
+        # assert costmap_dict["use_costmap"]
+        # if "costmap" in costmap_dict:
+        #     print("Got costmap of dimension {} with unique values of {}".format(costmap_dict["costmap"].shape, set(costmap_dict["costmap"].flatten())))
+        # else:
+        #     return
+
+        start_t = time.time()
+
+        costmap = costmap_dict["costmap"]
 
         # print("Received costmap array and configs: {}".format(costmap_dict))
         # TODO: make sure samples can be taken based on the costmap
         # TODO: if we are only using costmap, we use nominal dynamics and risk-adjusted time-cost
+        # Based on semantics, construct the grid 
+        res = costmap_dict["res"]
+        self.res = res
+        self.cell_dimensions = (res, res)
+        self.xlimits = costmap_dict["xlimits"]
+        self.ylimits = costmap_dict["ylimits"]
+
+        self.num_rows, self.num_cols = costmap_dict["costmap"].shape
+        self.num_pmf_bins = costmap_dict["num_pmf_bins"]
+        self.bin_values = costmap_dict["bin_values"].astype(np.float32)
+        self.bin_values_bounds = costmap_dict["bin_values_bounds"].astype(np.float32)
+        # print(self.num_rows, self.num_pmf_bins, self.bin_values, self.bin_values_bounds)
+
+        # Default to using nominal dynamics and risk-adjusted time cost
+        assert (not self.use_det_dynamics) and (self.use_nom_dynamics_with_speed_map), "When using costmap, must have use_nom_dynamics_with_speed_map=True and use_det_dynamics=False"
+        
+        # self.use_det_dynamics = False
+        self.det_dynamics_cvar_alpha = costmap_dict["det_dynamics_cvar_alpha"]
+        # self.use_nom_dynamics_with_speed_map = True
+
+        # # Initialize pmf grid
+        # Account for padding
+        self.pmf_grid = np.zeros((self.num_pmf_bins, self.num_rows, self.num_cols), dtype=np.int8)
+        
+        # Set PMF to have 1 in the last bin
+        self.pmf_grid[-1,:,:] = np.int8(100)
+
+        print("Took {} to initialize pmf grid".format(time.time()- start_t))
+
+        start_t = time.time()
 
 
+        # Generate the risk speed map (CVaR)
+        # TODO: further speed-up is possible via GPU kernel
+        risk_traction_map = 100*np.ones((self.num_rows, self.num_cols), dtype=np.int8)
+        no_info_mask = (costmap==255)
+        lethal_mask = ((costmap > costmap_dict["costmap_lethal_threshold"]) & (~no_info_mask))
+        risk_traction_map[no_info_mask] = -1
+        risk_traction_map[lethal_mask] = -2
+        self.risk_traction_map_d = cuda.to_device(risk_traction_map.reshape((1, self.num_rows, self.num_cols)))
+
+        print("Took {} to handle costmap values iteratively".format(time.time()- start_t))
+
+        start_t = time.time()
+
+        padded_pmf_grid, padded_xlimits, padded_ylimits = self.set_padding(self.pmf_grid, self.max_speed_padding, self.dt, res,
+                                                            self.xlimits, self.ylimits)
+        self.pmf_grid_d = cuda.to_device(padded_pmf_grid)
+        self.padded_xlimits = padded_xlimits
+        self.padded_ylimits = padded_ylimits
+        _, self.padded_num_cols, self.padded_num_rows = padded_pmf_grid.shape
+        self.bin_values_d = cuda.to_device(self.bin_values)
+        self.bin_values_bounds_d = cuda.to_device(self.bin_values_bounds)
+        self.pmf_grid_initialized = True
+
+        print("Took {} to transfer procesed PMF grid to device".format(time.time()- start_t))
 
 
 
@@ -290,14 +363,17 @@ class TDM_Numba(object):
 
 
     def init_device_vars_before_sampling(self, det_dyn=False, seed=1):
+        # print("In tdm's init_device_vars_before_sampling")
         # num_samples = number of grids
         if not self.device_var_initialized:
+            print(self.pmf_grid_d.shape, self.TOTAL_THREADS, self.NUM_GRID_SAMPLES, self.THREAD_DIM)
+
             _, rows, cols = self.pmf_grid_d.shape
             if not det_dyn:
-                self.rng_states_d = create_xoroshiro128p_states(self.TOTAL_THREADS, seed=seed)
+                # self.rng_states_d = create_xoroshiro128p_states(self.TOTAL_THREADS, seed=seed)
                 self.sample_grid_batch_d = cuda.device_array((self.NUM_GRID_SAMPLES, rows, cols), dtype=np.int8)
             else:
-                self.rng_states_d = create_xoroshiro128p_states(self.THREAD_DIM[0]*self.THREAD_DIM[1], seed=seed)
+                # self.rng_states_d = create_xoroshiro128p_states(self.THREAD_DIM[0]*self.THREAD_DIM[1], seed=seed)
                 self.sample_grid_batch_d = cuda.device_array((1, rows, cols), dtype=np.int8)
 
             self.device_var_initialized = True
