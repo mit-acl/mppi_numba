@@ -166,8 +166,6 @@ class MPPI_Numba(object):
       return
     
     # Move things to GPU
-    # print("Before moving params to GPU")
-
     res_d = np.float32(self.lin_tdm.res) # no need to move int
     xlimits_d = cuda.to_device(self.lin_tdm.padded_xlimits.astype(np.float32))
     ylimits_d = cuda.to_device(self.lin_tdm.padded_ylimits.astype(np.float32))
@@ -178,7 +176,7 @@ class MPPI_Numba(object):
     goal_tolerance_d = np.float32(self.params['goal_tolerance'])
     lambda_weight_d = np.float32(self.params['lambda_weight'])
     u_std_d = cuda.to_device(self.params['u_std'].astype(np.float32))
-    cvar_alpha_d = np.float32(self.params['cvar_alpha'])
+    # cvar_alpha_d = np.float32(self.params['cvar_alpha'])
     x0_d = cuda.to_device(self.params['x0'].astype(np.float32))
     dt_d = np.float32(self.params['dt'])
     
@@ -200,6 +198,7 @@ class MPPI_Numba(object):
             self.rng_states_d, u_std_d, self.noise_samples_d)
       
       # print("Before launching kernel for rollouts")
+      # print("Before launching kernel for rollouts")
 
       # Rollout and compute mean or cvar
       self.rollout_det_dyn_w_speed_map_numba[cfg.num_control_rollouts, 1](
@@ -208,7 +207,7 @@ class MPPI_Numba(object):
         self.lin_tdm.risk_traction_map_d,
         # self.ang_tdm.risk_traction_map_d,
         self.lin_tdm.bin_values_bounds_d,
-        self.ang_tdm.bin_values_bounds_d,
+        # self.ang_tdm.bin_values_bounds_d,
         res_d,
         xlimits_d,
         ylimits_d,
@@ -227,7 +226,7 @@ class MPPI_Numba(object):
         # results
         self.costs_d
       )
-
+      # print("Before updating optimal control sequence")
       # Compute cost and update the optimal control on device
       self.update_useq_numba[1, 32](
         lambda_weight_d, 
@@ -711,7 +710,7 @@ class MPPI_Numba(object):
           lin_risk_traction_map_d,
           #ang_risk_traction_map_d,
           lin_bin_values_bounds_d,
-          ang_bin_values_bounds_d,
+          # ang_bin_values_bounds_d,
           res_d, 
           xlimits_d,
           ylimits_d,
@@ -732,19 +731,24 @@ class MPPI_Numba(object):
     Every thread in each block considers different traction grids but the same control sequence.
     Each block produces a single result (reduce a shared list to produce CVaR or mean. Is there a more efficient way to do this?)
     """
+    print(0)
     UNKNOWN_COST_RATIO = 10.0# 10.0
     OBS_COST_RATIO = 10000.0
 
 
     # Get block id and thread id
     bid = cuda.blockIdx.x   # index of block
-    tid = cuda.threadIdx.x  # index of thread within a block
+    # tid = cuda.threadIdx.x  # index of thread within a block
     costs_d[bid] = 0.0
+
+    if bid==0:
+      print(1)
+
 
     # Explicit unicycle update and map lookup
     # From here on we assume grid is properly padded so map lookup remains valid
     # height, width = lin_sample_grid_batch_d[tid].shape
-    height, width = lin_risk_traction_map_d[0].shape
+    # height, width = lin_risk_traction_map_d[0].shape
     x_curr = cuda.local.array(3, numba.float32)
     for i in range(3): 
       x_curr[i] = x0_d[i]
@@ -756,8 +760,10 @@ class MPPI_Numba(object):
     v_nom =v_noisy = w_nom = w_noisy = 0.0
 
     lin_ratio = 0.01*(lin_bin_values_bounds_d[1]-lin_bin_values_bounds_d[0])
-    ang_ratio = 0.01*(ang_bin_values_bounds_d[1]-ang_bin_values_bounds_d[0])
+    # ang_ratio = 0.01*(ang_bin_values_bounds_d[1]-ang_bin_values_bounds_d[0])
 
+    if bid==0:
+      print(2)
     for t in range(timesteps):
       # Look up the traction parameters from map
       xi = numba.int32((x_curr[0]-xlimits_d[0])//res_d)
@@ -786,8 +792,6 @@ class MPPI_Numba(object):
         costs_d[bid] += dt_d*OBS_COST_RATIO
         break # no need to loop if in collision
       
-      # Add some speed cost
-      # costs_d[bid] += (0.1*v_noisy**2+0.1*w_noisy**2)
 
       if not goal_reached:
         dist_to_goal2 = (xgoal_d[0]-x_curr[0])**2 + (xgoal_d[1]-x_curr[1])**2
