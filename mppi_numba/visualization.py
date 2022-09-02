@@ -13,9 +13,6 @@ class TDM_Visualizer(object):
 
     def __init__(self, tdm):
         self.semantic_grid_initialized = tdm.semantic_grid_initialized
-        return_v = tdm.get_padded_grid_xy_dim()
-        if return_v is not None:
-            self.num_rows, self.num_cols = return_v
         self.ylimits = copy.deepcopy(tdm.ylimits)
         self.xlimits = copy.deepcopy(tdm.xlimits)
 
@@ -38,9 +35,13 @@ class TDM_Visualizer(object):
         self.id2name[-1] = "Padding"
         self.id2rgb[-1] = (0,0,0,)
 
+
+        return_v = tdm.get_padded_grid_xy_dim()
+        assert return_v is not None, "Cannot get padded grid dimension from TDM."
+        self.num_rows, self.num_cols = copy.deepcopy(return_v)
         original_semantic_grid = copy.deepcopy(self.semantic_grid)
         self.semantic_grid = -1*np.ones((self.num_rows, self.num_cols))
-        self.semantic_grid[self.pad_width:(self.num_rows-self.pad_width), self.pad_width:(self.num_cols-self.pad_width)] = original_semantic_grid
+        self.semantic_grid[self.pad_width:(self.num_rows-self.pad_width), self.pad_width:(self.num_cols-self.pad_width)] = original_semantic_grid[:self.num_rows-2*self.pad_width, :self.num_cols - 2*self.pad_width]
             
 
     def draw(self, figsize=(10,10)):

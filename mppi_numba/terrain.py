@@ -81,7 +81,6 @@ class TDM_Numba(object):
         self.use_det_dynamics = cfg.use_det_dynamics
         self.use_nom_dynamics_with_speed_map = cfg.use_nom_dynamics_with_speed_map
         self.use_costmap = cfg.use_costmap
-
         self.det_dyn = self.use_det_dynamics or self.use_nom_dynamics_with_speed_map or self.use_costmap
 
         # Other TDM specific params from cfg
@@ -90,6 +89,17 @@ class TDM_Numba(object):
         self.total_threads = self.num_grid_samples*self.thread_dim[0]*self.thread_dim[1]
 
 
+        # Reuseable device memory
+        self.sample_grid_batch_d = None
+        self.risk_traction_map_d = None # for adjusting time cost
+        self.rng_states_d = None
+
+        # Other task specific params that can be changed for this object
+        self.device_var_initialized = False
+        self.reset()
+
+
+    def reset(self):
         # For initialization from semantic grid (for sim benchmarks only)
         self.semantic_grid = None # semantic_grid # semantic ids
         self.semantic_grid_initialized = False
@@ -115,22 +125,16 @@ class TDM_Numba(object):
         self.res = None
         self.pmf_grid_initialized = False
 
-        # # For variants of MPPI
-        # self.use_det_dynamics = use_det_dynamics
-        # self.use_nom_dynamics_with_speed_map = use_nom_dynamics_with_speed_map
-        # self.use_costmap = use_costmap
+        # For variants of MPPI that use determinisitc dynamics (CVaR of traction)
         self.det_dynamics_cvar_alpha = None
-
-        # Initialize batch_sample variables
-        self.sample_grid_batch_d = None
-        self.risk_traction_map_d = None # for adjusting time cost
-        self.rng_states_d = None
-        self.device_var_initialized = False
-        self.init_device_vars_before_sampling()
 
         # For visualization
         self.cell_dimensions = None
         self.figsize = None
+
+        # Initialize batch_sample variables
+        self.init_device_vars_before_sampling()
+
 
 
     def init_device_vars_before_sampling(self):
@@ -274,10 +278,10 @@ class TDM_Numba(object):
         self.bin_values_d = cuda.to_device(bin_values)
         self.bin_values_bounds_d = cuda.to_device(bin_values_bounds)
         
-        # How to ensure the padded map fits properly in the allocated device memory?
-        # Check dimension 
-        # Get max col and max rows to sample over (must be the min of allocated and provided pmf)
-        # Store this info in class variable 
+        # Crop the original semantic map to fit in memory
+        num_rows, num_cols = self.pmf_grid_d.shape[1:]
+        original_semantic_grid = copy.deepcopy(self.semantic_grid)
+        self.semantic_grid = original_semantic_grid[:num_rows-2*self.pad_cells, :num_cols - 2*self.pad_cells]
 
         self.pmf_grid_initialized = True
 
