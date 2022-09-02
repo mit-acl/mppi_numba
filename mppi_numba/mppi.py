@@ -6,26 +6,37 @@ import numba
 import time
 from numba import cuda
 from numba.cuda.random import create_xoroshiro128p_states, xoroshiro128p_normal_float32 # , xoroshiro128p_uniform_float32
-
-
-# TODO: import the control configurations from a config file?
 from .config import Config
-cfg = Config()
-NUM_GRID_SAMPLES = cfg.num_grid_samples # Has to be a constant when used in kernel (cannot be class property)
-NUM_STEPS = cfg.num_steps
-NUM_VIS_STATE_ROLLOUTS = cfg.num_vis_state_rollouts
-# Sanity checks
-assert cfg.num_steps <= 1024, "NUM_STEPS={} current cannot be more than 1024".format(cfg.num_steps)
+
+# The only trick available in Numba to allocate shared array dynamically: https://stackoverflow.com/questions/30510580/numba-cuda-shared-memory-size-at-runtime
+# Requested support for N-D shared array: https://github.com/numba/numba/issues/2463
 
 
 class MPPI_Numba(object):
 
-  # NUM_CONTROL_ROLLOUTS = cfg.num_control_rollouts
-  # NUM_STEPS = cfg.num_steps
-  # NUM_GRID_SAMPLES = cfg.num_grid_samples
+  def __init__(self, cfg):
 
+    # Fixed configs
+    self.cfg = cfg
+    self.T = cfg.T
+    self.dt = cfg.dt
+    self.num_steps = cfg.num_steps
+    self.num_grid_samples = cfg.num_grid_samples
+    self.num_control_rollouts = cfg.num_control_rollouts
+    self.max_speed_padding = cfg.max_speed_padding
+    self.tdm_sample_thread_dim = cfg.tdm_sample_thread_dim
+    self.num_vis_state_rollouts = cfg.num_vis_state_rollouts
+    self.max_map_xy_dim = cfg.max_map_xy_dim
+    self.seed = cfg.seed
+    self.use_tdm = cfg.use_tdm
+    self.use_det_dynamics = cfg.use_det_dynamics
+    self.use_nom_dynamics_with_speed_map = cfg.use_nom_dynamics_with_speed_map
+    self.use_costmap = cfg.use_costmap
 
-  def __init__(self):
+    self.det_dyn = self.use_det_dynamics or self.use_nom_dynamics_with_speed_map or self.use_costmap
+
+    # Other task specific params
+    self.u_seq0 = np.zeros((self.num_steps, 2), dtype=np.float32)
     self.params = None
     self.params_set = False
 
@@ -41,219 +52,105 @@ class MPPI_Numba(object):
     self.weights_d = None
     self.rng_states_d = None
     self.state_rollout_batch_d = None # For visualization only. Otherwise, inefficient
-    self.det_dyn = False
     self.device_var_initialized = False
+    # Initialize all the device variables 
+    self.init_device_vars_before_solving()
+    
 
-    # self.test_numba_rng()
-    self.rng_states_d = create_xoroshiro128p_states(cfg.num_control_rollouts*cfg.num_steps, seed=1)
+  def init_device_vars_before_solving(self):
 
+    if not self.device_var_initialized:
+      t0 = time.time()
+      
+      self.noise_samples_d = cuda.device_array((self.num_control_rollouts, self.num_steps, 2), dtype=np.float32) # to be sampled collaboratively via GPU
+      self.u_cur_d = cuda.to_device(self.u_seq0) 
+      self.costs_d = cuda.device_array((self.num_control_rollouts), dtype=np.float32)
+      self.weights_d = cuda.device_array((self.num_control_rollouts), dtype=np.float32)
+      
+      ## Why putting this line here freezes in phoenix unity sim?? 
+      ## But putting it in the __init__() didn't freeze -- reinvestigate
+      self.rng_states_d = create_xoroshiro128p_states(self.num_control_rollouts*self.num_steps, seed=self.seed)
+      
+      if not self.det_dyn:  
+        self.state_rollout_batch_d = cuda.device_array((self.num_vis_state_rollouts, self.num_steps+1, 3), dtype=np.float32)
+      else:
+        self.state_rollout_batch_d = cuda.device_array((1, self.num_steps+1, 3), dtype=np.float32)
+      
+      self.device_var_initialized = True
+      print("MPPI planner has initialized GPU memory after {} s".format(time.time()-t0))
+
+
+  def setup(self, params, lin_tdm, ang_tdm):
+    # These tend to change (e.g., current robot position, the map) after each step
+    self.set_tdm(lin_tdm, ang_tdm)
+    self.set_params(params)
 
   def is_within_bound(self, v, vbounds):
     return v>=vbounds[0] and v<=vbounds[1]
 
-  def setup(self, params, lin_tdm, ang_tdm):
-    # print("MPPI setup is invoked: {}".format(params))
-    self.set_tdm(lin_tdm, ang_tdm)
-    self.set_params(params)
-
   def set_params(self, params):
-    # Check conditions
-    # assert self.tdm_set, "TDM must be set before MPPI parameters"
-    assert self.is_within_bound(params['x0'][0], self.lin_tdm.xlimits), "x0[0] is not within xlimits."
-    assert self.is_within_bound(params['x0'][1], self.lin_tdm.ylimits), "x0[1] is not within ylimits."
-
-    # Options to run variants of MPPI
-    assert not (params['use_det_dynamics'] and params['use_nom_dynamics_with_speed_map']) , \
-      "Cannot set both 'use_det_dynamics' and 'use_nom_dynamics_with_speed_map' to True."
+    if not self.is_within_bound(params['x0'][0], self.lin_tdm.xlimits):
+      print("ERROR: When setting mppi params, x0[0] is not within xlimits!")
+      assert False
+    if not self.is_within_bound(params['x0'][1], self.lin_tdm.ylimits):
+      print("ERROR: When setting mppi params, x0[1] is not within ylimits!")
+      assert False
 
     self.params = copy.deepcopy(params)
-    if "u_seq0" not in self.params:
-      self.params["u_seq0"] = np.zeros((self.params["timesteps"], 3), dtype=np.float32)
-
-    self.det_dyn = self.params['use_det_dynamics'] or self.params['use_nom_dynamics_with_speed_map']
     self.params_set = True
-
-  def update_params(self, sub_params):
-    # Update a subset of the parameters (e.g., x0, xgoal)
-    for key, val in sub_params.items():
-      if key in self.params:
-        self.params[key] = val
 
   def set_tdm(self, lin_tdm, ang_tdm):
     self.lin_tdm = lin_tdm
     self.ang_tdm = ang_tdm
     self.tdm_set = True
 
-
-  # @cuda.jit
-  # def f(a, b, c):
-  #     # like threadIdx.x + (blockIdx.x * blockDim.x)
-  #     tid = cuda.grid(1)
-  #     size = len(c)
-
-  #     if tid < size:
-  #         c[tid] = a[tid] + b[tid]
-
-
-  # def test(self):
-  #   print("testing")
-  #   N = 1000
-  #   a = cuda.to_device(np.random.random(N))
-  #   b = cuda.to_device(np.random.random(N))
-  #   c = cuda.device_array_like(a)
-  #   self.f.forall(len(a))(a, b, c)
-  #   # print(c.copy_to_host())
-
-
-  # def test_numba_rng(self):
-  #     print("testing")
-  #     t0 = time.time()
-  #     create_xoroshiro128p_states(100*1024, seed=1)
-  #     print("finished testing after {}s".format(time.time()-t0))
-
-
-  def init_device_vars_before_solving(self):
-    # print("MPPI init_device_vars_before_solving is called")
-    # noise, sol, 
+  def check_solve_conditions(self):
     if not self.params_set:
-      print("Params not set. Cannot initialize GPU memory for noise samples and current control sequence.")
-      assert False, "Params not set. Cannot initialize GPU memory for noise samples and current control sequence."
-
+      print("MPPI parameters are not set. Cannot solve")
+      return False
+    if not self.tdm_set:
+      print("MPPI has not received TDMs. Cannot solve")
+      return False
     if not self.device_var_initialized:
-      # print("MPPI GPU vars have not been initialized")
+      print("Device variables not initialized. Cannot solve.")
+      return False
+    if not self.lin_tdm.pmf_grid_initialized:
+      print("Linear TDM's PMF not initialized. Cannot solve.")
+      return False
+    if not self.ang_tdm.pmf_grid_initialized:
+      print("Angular TDM's PMF not initialized. Cannot solve.")
+      return False
 
-      # create_xoroshiro128p_states(1, seed=1) # why this freezes???
+    # Check initial condition within bound
+    if not self.is_within_bound(self.params["x0"][0], self.lin_tdm.padded_xlimits):
+      print("Robot initial condition not within padded xlimits.")
+      return False
+    if not self.is_within_bound(self.params["x0"][1], self.lin_tdm.padded_ylimits):
+      print("Robot initial condition not within padded ylimits.")
+      return False
 
-
-      self.noise_samples_d = cuda.device_array((cfg.num_control_rollouts, cfg.num_steps, 2), dtype=np.float32) # to be sampled collaboratively via GPU
-      self.costs_d = cuda.device_array((cfg.num_control_rollouts), dtype=np.float32)
-      self.weights_d = cuda.device_array((cfg.num_control_rollouts), dtype=np.float32)
-      
-      ## Why putting this line here freezes in phoenix unity sim?? 
-      ## But putting it in the __init__() didn't freeze -- reinvestigate
-      # self.rng_states_d = create_xoroshiro128p_states(cfg.num_control_rollouts*cfg.num_steps, seed=1)
-      
-      self.u_cur_d = cuda.to_device(np.asarray(self.params['u_seq0']).astype(np.float32)) # likely reused
-      if not self.det_dyn:  
-        self.state_rollout_batch_d = cuda.device_array((cfg.num_vis_state_rollouts, cfg.num_steps+1, 3), dtype=np.float32)
-      else:
-        self.state_rollout_batch_d = cuda.device_array((1, cfg.num_steps+1, 3), dtype=np.float32)
-      
-      self.device_var_initialized = True
-    # else:
-    #   print("MPPI has already been initialized. Skip CUDA mem allocation")
-
+    return True
 
   def solve(self):
+    if not self.check_solve_conditions():
+      print("MPPI solve condition not met. Cannot solve. Return")
+      return
 
-    if self.params['use_det_dynamics']:
-      print("MPPI uses CVAR dynamics.")
+    if self.use_det_dynamics:
+      # print("MPPI uses CVAR dynamics.")
       return self.solve_det_dyn()
-    elif self.params['use_nom_dynamics_with_speed_map'] or self.params["use_costmap"]:
-      print("MPPI uses nominal dynamics with risk-adjusted cost.")
+    elif self.use_nom_dynamics_with_speed_map or self.use_costmap:
+      # print("MPPI uses nominal dynamics with risk-adjusted cost.")
       return self.solve_nom_dyn_w_speed_map()
-    else:
-      print("MPPI uses noisy unicycles")
+    elif self.use_tdm:
+      # print("MPPI uses noisy unicycles")
       return self.solve_stochastic()
+    else:
+      print("None of the planner options are selected.")
+      assert False
 
 
-  def solve_nom_dyn_w_speed_map(self):
-    assert self.params_set, "MPPI parameters are not set"
-    assert self.tdm_set, "MPPI has not received TDMs"
-    assert self.lin_tdm.pmf_grid_initialized
-    assert self.ang_tdm.pmf_grid_initialized
-
-    if not self.device_var_initialized:
-      print("Device variables not initialized. Cannot run mppi.")
-      return
-    
-    # Move things to GPU
-    res_d = np.float32(self.lin_tdm.res) # no need to move int
-    xlimits_d = cuda.to_device(self.lin_tdm.padded_xlimits.astype(np.float32))
-    ylimits_d = cuda.to_device(self.lin_tdm.padded_ylimits.astype(np.float32))
-    vrange_d = cuda.to_device(self.params['vrange'].astype(np.float32))
-    wrange_d = cuda.to_device(self.params['wrange'].astype(np.float32))
-    xgoal_d = cuda.to_device(self.params['xgoal'].astype(np.float32))
-    v_post_rollout_d = np.float32(self.params['v_post_rollout'])
-    goal_tolerance_d = np.float32(self.params['goal_tolerance'])
-    lambda_weight_d = np.float32(self.params['lambda_weight'])
-    u_std_d = cuda.to_device(self.params['u_std'].astype(np.float32))
-    # cvar_alpha_d = np.float32(self.params['cvar_alpha'])
-    x0_d = cuda.to_device(self.params['x0'].astype(np.float32))
-    dt_d = np.float32(self.params['dt'])
-    
-    
-    # Sample environment realizations for estimating cvar
-    # print("Before initializing device vars for tdms")
-    self.lin_tdm.init_device_vars_before_sampling(det_dyn=True)
-    self.ang_tdm.init_device_vars_before_sampling(det_dyn=True)
-    # lin_sample_grid_batch_d = self.lin_tdm.sample_grids(det_dyn=True) # get ref to device samples
-    # ang_sample_grid_batch_d = self.ang_tdm.sample_grids(det_dyn=True) # get ref to device samples
-
-    # Optimization loop
-    for k in range(self.params['num_opt']):
-      # Sample control noise
- 
-      # print("Before launching kernel for sampling noise")
-
-      self.sample_noise_numba[cfg.num_control_rollouts, cfg.num_steps](
-            self.rng_states_d, u_std_d, self.noise_samples_d)
-      
-      # print("Before launching kernel for rollouts")
-      # print("Before launching kernel for rollouts")
-
-      # Rollout and compute mean or cvar
-      self.rollout_det_dyn_w_speed_map_numba[cfg.num_control_rollouts, 1](
-        # lin_sample_grid_batch_d,
-        # ang_sample_grid_batch_d,
-        self.lin_tdm.risk_traction_map_d,
-        # self.ang_tdm.risk_traction_map_d,
-        self.lin_tdm.bin_values_bounds_d,
-        # self.ang_tdm.bin_values_bounds_d,
-        res_d,
-        xlimits_d,
-        ylimits_d,
-        vrange_d,
-        wrange_d,
-        xgoal_d,
-        v_post_rollout_d,
-        goal_tolerance_d,
-        lambda_weight_d,
-        u_std_d,
-        # cvar_alpha_d,
-        x0_d,
-        dt_d,
-        self.noise_samples_d,
-        self.u_cur_d,
-        # results
-        self.costs_d
-      )
-      # print("Before updating optimal control sequence")
-      # Compute cost and update the optimal control on device
-      self.update_useq_numba[1, 32](
-        lambda_weight_d, 
-        self.costs_d, 
-        self.noise_samples_d, 
-        self.weights_d, 
-        vrange_d,
-        wrange_d,
-        self.u_cur_d
-      )
-
-    # print("Returning MPPI solution")
-    # Full control sequence copied from GPU
-    return self.u_cur_d.copy_to_host()
-
-
-  def solve_det_dyn(self):
-    assert self.params_set, "MPPI parameters are not set"
-    assert self.tdm_set, "MPPI has not received TDMs"
-
-    if not self.device_var_initialized:
-      print("Device variables not initialized. Cannot run mppi.")
-      return
-    
-    # Move things to GPU
+  def move_mppi_task_vars_to_device(self):
     res_d = np.float32(self.lin_tdm.res) # no need to move int
     xlimits_d = cuda.to_device(self.lin_tdm.padded_xlimits.astype(np.float32))
     ylimits_d = cuda.to_device(self.lin_tdm.padded_ylimits.astype(np.float32))
@@ -267,33 +164,77 @@ class MPPI_Numba(object):
     cvar_alpha_d = np.float32(self.params['cvar_alpha'])
     x0_d = cuda.to_device(self.params['x0'].astype(np.float32))
     dt_d = np.float32(self.params['dt'])
-    
-    
-    # Sample environment realizations for estimating cvar
-    # self.lin_tdm.print_bin_values_bounds("lin_tdm before init device var")
-    # self.ang_tdm.print_bin_values_bounds("ang_tdm before init device var")
-    
-    self.lin_tdm.init_device_vars_before_sampling(det_dyn=True)
-    self.ang_tdm.init_device_vars_before_sampling(det_dyn=True)
-    
-    self.lin_tdm.print_bin_values_bounds("lin_tdm after init device var")
-    self.ang_tdm.print_bin_values_bounds("ang_tdm after init device var")
-    
-    lin_sample_grid_batch_d = self.lin_tdm.sample_grids(det_dyn=True) # get ref to device samples
-    ang_sample_grid_batch_d = self.ang_tdm.sample_grids(det_dyn=True) # get ref to device samples
+    return res_d, xlimits_d, ylimits_d, vrange_d, wrange_d, xgoal_d, \
+           v_post_rollout_d, goal_tolerance_d, lambda_weight_d, \
+           u_std_d, cvar_alpha_d, x0_d, dt_d
 
-    self.lin_tdm.print_bin_values_bounds("lin_tdm after sample grid")
-    self.ang_tdm.print_bin_values_bounds("ang_tdm after sample grid")
+  def solve_nom_dyn_w_speed_map(self):
+    
+    res_d, xlimits_d, ylimits_d, vrange_d, wrange_d, xgoal_d, \
+           v_post_rollout_d, goal_tolerance_d, lambda_weight_d, \
+           u_std_d, cvar_alpha_d, x0_d, dt_d = self.move_mppi_task_vars_to_device()
+  
+
+    # Optimization loop
+    for k in range(self.params['num_opt']):
+
+      # Sample control noise
+      self.sample_noise_numba[self.num_control_rollouts, self.num_steps](
+            self.rng_states_d, u_std_d, self.noise_samples_d)
+      
+      # Rollout and compute mean or cvar
+      self.rollout_det_dyn_w_speed_map_numba[self.num_control_rollouts, 1](
+        self.lin_tdm.risk_traction_map_d,
+        self.lin_tdm.bin_values_bounds_d,
+        res_d,
+        xlimits_d,
+        ylimits_d,
+        vrange_d,
+        wrange_d,
+        xgoal_d,
+        v_post_rollout_d,
+        goal_tolerance_d,
+        lambda_weight_d,
+        u_std_d,
+        x0_d,
+        dt_d,
+        self.noise_samples_d,
+        self.u_cur_d,
+
+        # results
+        self.costs_d
+      )
+
+      # Compute cost and update the optimal control on device
+      self.update_useq_numba[1, 32](
+        lambda_weight_d, 
+        self.costs_d, 
+        self.noise_samples_d, 
+        self.weights_d, 
+        vrange_d,
+        wrange_d,
+        self.u_cur_d
+      )
+
+    return self.u_cur_d.copy_to_host()
+
+
+  def solve_det_dyn(self):
+
+    res_d, xlimits_d, ylimits_d, vrange_d, wrange_d, xgoal_d, \
+           v_post_rollout_d, goal_tolerance_d, lambda_weight_d, \
+           u_std_d, cvar_alpha_d, x0_d, dt_d = self.move_mppi_task_vars_to_device()
+    
+    lin_sample_grid_batch_d = self.lin_tdm.sample_grids() # get ref to device samples
+    ang_sample_grid_batch_d = self.ang_tdm.sample_grids() # get ref to device samples
 
     # Optimization loop
     for k in range(self.params['num_opt']):
       # Sample control noise
-      self.sample_noise_numba[cfg.num_control_rollouts, cfg.num_steps](
+      self.sample_noise_numba[self.num_control_rollouts, self.num_steps](
             self.rng_states_d, u_std_d, self.noise_samples_d)
-      # self.lin_tdm.print_bin_values_bounds("lin_tdm after sample noise")
-      # self.ang_tdm.print_bin_values_bounds("ang_tdm after sample noise")      
       # Rollout and compute mean or cvar
-      self.rollout_det_dyn_numba[cfg.num_control_rollouts, 1](
+      self.rollout_det_dyn_numba[self.num_control_rollouts, 1](
         lin_sample_grid_batch_d,
         ang_sample_grid_batch_d,
         self.lin_tdm.bin_values_bounds_d,
@@ -308,16 +249,15 @@ class MPPI_Numba(object):
         goal_tolerance_d,
         lambda_weight_d,
         u_std_d,
-        # cvar_alpha_d,
         x0_d,
         dt_d,
         self.noise_samples_d,
         self.u_cur_d,
+
         # results
         self.costs_d
       )
-      # self.lin_tdm.print_bin_values_bounds("lin_tdm after rollout_det_dyn_numba")
-      # self.ang_tdm.print_bin_values_bounds("ang_tdm after rollout_det_dyn_numba")
+
       # Compute cost and update the optimal control on device
       self.update_useq_numba[1, 32](
         lambda_weight_d, 
@@ -334,43 +274,54 @@ class MPPI_Numba(object):
 
 
   def solve_stochastic(self):
-    assert self.params_set, "MPPI parameters are not set"
-    assert self.tdm_set, "MPPI has not received TDMs"
 
-    if not self.device_var_initialized:
-      print("Device variables not initialized. Cannot run mppi.")
-      return
-    
-    # Move things to GPU
-    res_d = np.float32(self.lin_tdm.res) # no need to move int
-    xlimits_d = cuda.to_device(self.lin_tdm.padded_xlimits.astype(np.float32))
-    ylimits_d = cuda.to_device(self.lin_tdm.padded_ylimits.astype(np.float32))
-    vrange_d = cuda.to_device(self.params['vrange'].astype(np.float32))
-    wrange_d = cuda.to_device(self.params['wrange'].astype(np.float32))
-    xgoal_d = cuda.to_device(self.params['xgoal'].astype(np.float32))
-    v_post_rollout_d = np.float32(self.params['v_post_rollout'])
-    goal_tolerance_d = np.float32(self.params['goal_tolerance'])
-    lambda_weight_d = np.float32(self.params['lambda_weight'])
-    u_std_d = cuda.to_device(self.params['u_std'].astype(np.float32))
-    cvar_alpha_d = np.float32(self.params['cvar_alpha'])
-    x0_d = cuda.to_device(self.params['x0'].astype(np.float32))
-    dt_d = np.float32(self.params['dt'])
+    res_d, xlimits_d, ylimits_d, vrange_d, wrange_d, xgoal_d, \
+           v_post_rollout_d, goal_tolerance_d, lambda_weight_d, \
+           u_std_d, cvar_alpha_d, x0_d, dt_d = self.move_mppi_task_vars_to_device()
     
     
     # Sample environment realizations for estimating cvar
-    self.lin_tdm.init_device_vars_before_sampling()
-    self.ang_tdm.init_device_vars_before_sampling()
+    # self.lin_tdm.init_device_vars_before_sampling()
+    # self.ang_tdm.init_device_vars_before_sampling()
     lin_sample_grid_batch_d = self.lin_tdm.sample_grids() # get ref to device samples
     ang_sample_grid_batch_d = self.ang_tdm.sample_grids() # get ref to device samples
 
     # Optimization loop
     for k in range(self.params['num_opt']):
       # Sample control noise
-      self.sample_noise_numba[cfg.num_control_rollouts, cfg.num_steps](
+      self.sample_noise_numba[self.num_control_rollouts, self.num_steps](
             self.rng_states_d, u_std_d, self.noise_samples_d)
       
+      # # Rollout and compute mean or cvar
+      # self.rollout_numba[self.num_control_rollouts, self.num_grid_samples](
+      #   lin_sample_grid_batch_d,
+      #   ang_sample_grid_batch_d,
+      #   self.lin_tdm.bin_values_bounds_d,
+      #   self.ang_tdm.bin_values_bounds_d,
+      #   res_d,
+      #   xlimits_d,
+      #   ylimits_d,
+      #   vrange_d,
+      #   wrange_d,
+      #   xgoal_d,
+      #   v_post_rollout_d,
+      #   goal_tolerance_d,
+      #   lambda_weight_d,
+      #   u_std_d,
+      #   cvar_alpha_d,
+      #   x0_d,
+      #   dt_d,
+      #   self.noise_samples_d,
+      #   self.u_cur_d,
+      #   # results
+      #   self.costs_d
+      # )
+
+      # Use trick to dynamically allocate shared array in kernel: # https://stackoverflow.com/questions/30510580/numba-cuda-shared-memory-size-at-runtime
+      stream = 0
+      shared_array_size = self.num_grid_samples * np.float32().itemsize # how many bytes of shared array size?
       # Rollout and compute mean or cvar
-      self.rollout_numba[cfg.num_control_rollouts, cfg.num_grid_samples](
+      self.rollout_numba[self.num_control_rollouts, self.num_grid_samples, stream, shared_array_size](
         lin_sample_grid_batch_d,
         ang_sample_grid_batch_d,
         self.lin_tdm.bin_values_bounds_d,
@@ -393,6 +344,8 @@ class MPPI_Numba(object):
         # results
         self.costs_d
       )
+
+      # print(self.costs_d.copy_to_host())
 
       # Compute cost and update the optimal control on device
       self.update_useq_numba[1, 32](
@@ -438,10 +391,10 @@ class MPPI_Numba(object):
 
     # Sample environment realizations for estimating cvar
     # TODO: can we save computation by not resampling for visualization?
-    self.lin_tdm.init_device_vars_before_sampling(det_dyn=self.det_dyn)
-    self.ang_tdm.init_device_vars_before_sampling(det_dyn=self.det_dyn)
-    lin_sample_grid_batch_d = self.lin_tdm.sample_grids(det_dyn=self.det_dyn) # get ref to device samples
-    ang_sample_grid_batch_d = self.ang_tdm.sample_grids(det_dyn=self.det_dyn) # get ref to device samples
+    # self.lin_tdm.init_device_vars_before_sampling(det_dyn=self.det_dyn)
+    # self.ang_tdm.init_device_vars_before_sampling(det_dyn=self.det_dyn)
+    lin_sample_grid_batch_d = self.lin_tdm.sample_grids() # get ref to device samples
+    ang_sample_grid_batch_d = self.ang_tdm.sample_grids() # get ref to device samples
     if self.det_dyn:
       self.get_state_rollout_numba[1, 1](
             self.state_rollout_batch_d, # where to store results
@@ -457,7 +410,7 @@ class MPPI_Numba(object):
             self.u_cur_d
             )
     else:
-      self.get_state_rollout_numba[1, NUM_VIS_STATE_ROLLOUTS](
+      self.get_state_rollout_numba[1, self.num_vis_state_rollouts](
             self.state_rollout_batch_d, # where to store results
             lin_sample_grid_batch_d,
             ang_sample_grid_batch_d,
@@ -475,6 +428,183 @@ class MPPI_Numba(object):
 
 
   """GPU kernels"""
+
+  # @staticmethod
+  # @cuda.jit(fastmath=True)
+  # def rollout_numba(
+  #         lin_sample_grid_batch_d,
+  #         ang_sample_grid_batch_d,
+  #         lin_bin_values_bounds_d,
+  #         ang_bin_values_bounds_d,
+  #         res_d, 
+  #         xlimits_d, 
+  #         ylimits_d, 
+  #         vrange_d, 
+  #         wrange_d, 
+  #         xgoal_d, 
+  #         v_post_rollout_d, 
+  #         goal_tolerance_d, 
+  #         lambda_weight_d, 
+  #         u_std_d, 
+  #         cvar_alpha_d, 
+  #         x0_d, 
+  #         dt_d,
+  #         noise_samples_d,
+  #         u_cur_d,
+  #         costs_d):
+  #   """
+  #   Every thread in each block considers different traction grids but the same control sequence.
+  #   Each block produces a single result (reduce a shared list to produce CVaR or mean. Is there a more efficient way to do this?)
+  #   """
+  #   # Get block id and thread id
+  #   bid = cuda.blockIdx.x   # index of block
+  #   tid = cuda.threadIdx.x  # index of thread within a block
+
+  #   # Create shared array for saving temporary costs
+  #   block_width = cuda.blockDim.x
+  #   # thread_cost_shared = cuda.shared.array(NUM_GRID_SAMPLES, dtype=numba.float32)
+    
+  #   thread_cost_shared = cuda.shared.array(shape=0, dtype=numba.float32) # Use trick to dynamically allocate shared memory (only can be 1d)
+  #                                                                                 # https://stackoverflow.com/questions/30510580/numba-cuda-shared-memory-size-at-runtime
+  #   if (thread_cost_shared.shape[0]!=block_width):
+  #     print("WARNING: shared array doesn't have the correct size. Return")
+  #     return
+  #   thread_cost_shared[tid] = 0.0
+  #   # Sync before moving on
+  #   # cuda.syncthreads()
+  #   timesteps = len(u_cur_d)
+
+
+
+  #   # ----------------------------------------------------
+  #   # # Move control sequence to shared array as well
+  #   # useq_shared = cuda.shared.array((NUM_STEPS, 2), dtype=numba.float32) # can only initialize using constants..
+  #   # noise_shared = cuda.shared.array((NUM_STEPS, 2), dtype=numba.float32) # can only initialize using constants..
+    
+  #   # # Since each thread uses the same sequence, construct in shared memory
+  #   # num = math.ceil(timesteps/block_width)
+  #   # tstart = min(tid*num, timesteps)
+  #   # tend = min(tstart+num, timesteps)
+  #   # for i in range(tstart, tend):
+  #   #   useq_shared[i,0] = u_cur_d[i,0]
+  #   #   useq_shared[i,1] = u_cur_d[i,1]
+  #   #   noise_shared[i,0] = noise_samples_d[bid, i,0]
+  #   #   noise_shared[i,1] = noise_samples_d[bid, i,1]
+    
+  #   # # Sync before moving on
+  #   # cuda.syncthreads()
+  #   # ----------------------------------------------------
+  #   # Do not move to shared memory
+
+  #   # ----------------------------------------------------
+
+
+  #   # Explicit unicycle update and map lookup
+  #   # From here on we assume grid is properly padded so map lookup remains valid
+  #   height, width = lin_sample_grid_batch_d[tid].shape
+  #   x_curr = cuda.local.array(3, numba.float32)
+  #   for i in range(3): 
+  #     x_curr[i] = x0_d[i]
+
+  #   goal_reached = False
+  #   goal_tolerance_d2 = goal_tolerance_d*goal_tolerance_d
+  #   dist_to_goal2 = 1e9
+  #   v_nom =v_noisy = w_nom = w_noisy = 0.0
+
+  #   lin_ratio = 0.01*(lin_bin_values_bounds_d[1]-lin_bin_values_bounds_d[0])
+  #   ang_ratio = 0.01*(ang_bin_values_bounds_d[1]-ang_bin_values_bounds_d[0])
+
+  #   # PI2 = numba.float32(math.pi*2.0)
+    
+  #   for t in range(timesteps):
+  #     # Look up the traction parameters from map
+  #     xi = numba.int32((x_curr[0]-xlimits_d[0])//res_d)
+  #     yi = numba.int32((x_curr[1]-ylimits_d[0])//res_d)
+
+  #     # vtraction = lin_bin_values_bounds_d[0] + lin_ratio*lin_sample_grid_batch_d[tid, yi, xi]
+  #     # wtraction = ang_bin_values_bounds_d[0] + ang_ratio*ang_sample_grid_batch_d[tid, yi, xi]
+  #     vtraction = lin_bin_values_bounds_d[0]+lin_ratio*lin_sample_grid_batch_d[tid, yi, xi]
+  #     wtraction = ang_bin_values_bounds_d[0]+ang_ratio*ang_sample_grid_batch_d[tid, yi, xi]
+
+  #     # Nominal noisy control
+  #     # v_nom = useq_shared[t, 0] + noise_shared[t, 0]
+  #     # w_nom = useq_shared[t, 1] + noise_shared[t, 1]
+  #     v_nom = u_cur_d[t, 0] + noise_samples_d[bid, i,0]
+  #     w_nom = u_cur_d[t, 1] + noise_samples_d[bid, i,1]
+  #     v_noisy = max(vrange_d[0], min(vrange_d[1], v_nom))
+  #     w_noisy = max(wrange_d[0], min(wrange_d[1], w_nom))
+      
+  #     # Forward simulate
+  #     x_curr[0] += dt_d*vtraction*v_noisy*math.cos(x_curr[2])
+  #     x_curr[1] += dt_d*vtraction*v_noisy*math.sin(x_curr[2])
+  #     x_curr[2] += dt_d*wtraction*w_noisy
+
+  #     # Clip angle values within [0, 2pi] (Hmm don't think is needed)
+  #     # x_curr[2] = math.fmod(math.fmod(x_curr[2], PI2)+PI2, PI2)
+
+  #     # Accumulate cost starting at the initial state
+  #     thread_cost_shared[tid]+=dt_d
+  #     if not goal_reached:
+  #       dist_to_goal2 = (xgoal_d[0]-x_curr[0])**2 + (xgoal_d[1]-x_curr[1])**2
+  #       if dist_to_goal2<= goal_tolerance_d2:
+  #         goal_reached = True
+  #         break
+      
+  #   # Accumulate terminal cost 
+  #   if not goal_reached:
+  #     thread_cost_shared[tid] += math.sqrt(dist_to_goal2)/v_post_rollout_d
+
+  #   # Accumulate the missing stage cost
+  #   for t in range(timesteps):
+  #     # thread_cost_shared[tid] += lambda_weight_d*(
+  #     #         (useq_shared[t,0]/(u_std_d[0]**2))*noise_shared[t,0] + (useq_shared[t,1]/(u_std_d[1]**2))*noise_shared[t, 1])
+  #     thread_cost_shared[tid] += lambda_weight_d*(
+  #             (u_cur_d[t,0]/(u_std_d[0]**2))*noise_samples_d[bid,t,0] + (u_cur_d[t,1]/(u_std_d[1]**2))*noise_samples_d[bid,t, 1])
+
+  #   # Reudce thread_cost_shared to a single value (mean or CVaR)
+  #   cuda.syncthreads()  # make sure all threads have produced costs
+
+  #   # print(thread_cost_shared[tid])
+
+  #   numel = block_width
+  #   if cvar_alpha_d<1:
+  #     numel = math.ceil(block_width*cvar_alpha_d)
+  #     # --- CVaR requires sorting the elements ---
+  #     # First sort the costs from descending order via parallel bubble sort
+  #     # https://stackoverflow.com/questions/42620649/sorting-algorithm-with-cuda-inside-or-outside-kernels
+  #     for i in range(math.ceil(block_width/2)):
+  #       # Odd
+  #       if (tid%2==0) and ((tid+1)!=block_width):
+  #         if thread_cost_shared[tid+1]>thread_cost_shared[tid]:
+  #           # swap
+  #           temp = thread_cost_shared[tid]
+  #           thread_cost_shared[tid] = thread_cost_shared[tid+1]
+  #           thread_cost_shared[tid+1] = temp
+  #       cuda.syncthreads()
+  #       # Even
+  #       if (tid%2==1) and ((tid+1)!=block_width):
+  #         if thread_cost_shared[tid+1]>thread_cost_shared[tid]:
+  #           # swap
+  #           temp = thread_cost_shared[tid]
+  #           thread_cost_shared[tid] = thread_cost_shared[tid+1]
+  #           thread_cost_shared[tid+1] = temp
+  #       cuda.syncthreads()
+
+  #   # Average reduction based on quantile (all elements for cvar_alpha_d==1)
+  #   # The mean of the first alpha% will be the CVaR
+  #   numel = math.ceil(block_width*cvar_alpha_d)
+  #   s = 1
+  #   while s < numel:
+  #     if (tid % (2 * s) == 0) and ((tid + s) < numel):
+  #       # Stride by `s` and add
+  #       thread_cost_shared[tid] += thread_cost_shared[tid + s]
+  #     s *= 2
+  #     cuda.syncthreads()
+
+  #   # After the loop, the zeroth  element contains the sum
+  #   if tid == 0:
+  #     costs_d[bid] = thread_cost_shared[0]/numel
+
 
   @staticmethod
   @cuda.jit(fastmath=True)
@@ -503,6 +633,10 @@ class MPPI_Numba(object):
     Every thread in each block considers different traction grids but the same control sequence.
     Each block produces a single result (reduce a shared list to produce CVaR or mean. Is there a more efficient way to do this?)
     """
+
+    NUM_GRID_SAMPLES=1024
+    NUM_STEPS=100
+
     # Get block id and thread id
     bid = cuda.blockIdx.x   # index of block
     tid = cuda.threadIdx.x  # index of thread within a block
@@ -510,10 +644,21 @@ class MPPI_Numba(object):
     # Create shared array for saving temporary costs
     block_width = cuda.blockDim.x
     thread_cost_shared = cuda.shared.array(NUM_GRID_SAMPLES, dtype=numba.float32)
-    thread_cost_shared[tid] = 0.0
+    
+    # thread_cost_shared = cuda.shared.array(shape=0, dtype=numba.float32) # Use trick to dynamically allocate shared memory (only can be 1d)
+    #                                                                               # https://stackoverflow.com/questions/30510580/numba-cuda-shared-memory-size-at-runtime
+    # if (thread_cost_shared.shape[0]!=block_width):
+    #   print("WARNING: shared array doesn't have the correct size. Return")
+    #   return
 
-    # Move control sequence to shared array as well
+
+    thread_cost_shared[tid] = 0.0
     timesteps = len(u_cur_d)
+
+
+
+    # ----------------------------------------------------
+    # Move control sequence to shared array as well
     useq_shared = cuda.shared.array((NUM_STEPS, 2), dtype=numba.float32) # can only initialize using constants..
     noise_shared = cuda.shared.array((NUM_STEPS, 2), dtype=numba.float32) # can only initialize using constants..
     
@@ -529,6 +674,11 @@ class MPPI_Numba(object):
     
     # Sync before moving on
     cuda.syncthreads()
+    # ----------------------------------------------------
+    # Do not move to shared memory
+
+    # ----------------------------------------------------
+
 
     # Explicit unicycle update and map lookup
     # From here on we assume grid is properly padded so map lookup remains valid
@@ -560,6 +710,8 @@ class MPPI_Numba(object):
       # Nominal noisy control
       v_nom = useq_shared[t, 0] + noise_shared[t, 0]
       w_nom = useq_shared[t, 1] + noise_shared[t, 1]
+      # v_nom = u_cur_d[t, 0] + noise_samples_d[bid, i,0]
+      # w_nom = u_cur_d[t, 1] + noise_samples_d[bid, i,1]
       v_noisy = max(vrange_d[0], min(vrange_d[1], v_nom))
       w_noisy = max(wrange_d[0], min(wrange_d[1], w_nom))
       
@@ -587,9 +739,13 @@ class MPPI_Numba(object):
     for t in range(timesteps):
       thread_cost_shared[tid] += lambda_weight_d*(
               (useq_shared[t,0]/(u_std_d[0]**2))*noise_shared[t,0] + (useq_shared[t,1]/(u_std_d[1]**2))*noise_shared[t, 1])
+      # thread_cost_shared[tid] += lambda_weight_d*(
+              # (u_cur_d[t,0]/(u_std_d[0]**2))*noise_samples_d[bid,t,0] + (u_cur_d[t,1]/(u_std_d[1]**2))*noise_samples_d[bid,t, 1])
 
     # Reudce thread_cost_shared to a single value (mean or CVaR)
     cuda.syncthreads()  # make sure all threads have produced costs
+
+    # print(thread_cost_shared[tid])
 
     numel = block_width
     if cvar_alpha_d<1:
@@ -815,8 +971,6 @@ class MPPI_Numba(object):
               (u_cur_d[t,0]/(u_std_d[0]**2))*noise_samples_d[bid, t,0] + (u_cur_d[t,1]/(u_std_d[1]**2))*noise_samples_d[bid, t, 1])
 
 
-
-
   @staticmethod
   @cuda.jit(fastmath=True)
   def update_useq_numba(
@@ -920,18 +1074,23 @@ class MPPI_Numba(object):
 
     # Move control sequence to shared array as well
     timesteps = len(u_cur_d)
-    useq_shared = cuda.shared.array((NUM_STEPS, 2), dtype=numba.float32) # can only initialize using constants..
+    # ----------------------------------------------------
+    # # Move control sequence to shared memory of the block
+    # useq_shared = cuda.shared.array((NUM_STEPS, 2), dtype=numba.float32) # can only initialize using constants..
     
-    # Since each thread uses the same sequence, construct in shared memory
-    num = math.ceil(timesteps/block_width)
-    tstart = min(tid*num, timesteps)
-    tend = min(tstart+num, timesteps)
-    for i in range(tstart, tend):
-      useq_shared[i,0] = u_cur_d[i,0]
-      useq_shared[i,1] = u_cur_d[i,1]
+    # # Since each thread uses the same sequence, construct in shared memory
+    # num = math.ceil(timesteps/block_width)
+    # tstart = min(tid*num, timesteps)
+    # tend = min(tstart+num, timesteps)
+    # for i in range(tstart, tend):
+    #   useq_shared[i,0] = u_cur_d[i,0]
+    #   useq_shared[i,1] = u_cur_d[i,1]
     
-    # Sync before moving on
-    cuda.syncthreads()
+    # # Sync before moving on
+    # cuda.syncthreads()
+    # ----------------------------------------------------
+    # Do not move to shared memory
+    # ----------------------------------------------------
 
     # Explicit unicycle update and map lookup
     # From here on we assume grid is properly padded so map lookup remains valid
@@ -952,9 +1111,11 @@ class MPPI_Numba(object):
       vtraction = lin_bin_values_bounds_d[0] + lin_ratio*lin_sample_grid_batch_d[tid, yi, xi]
       wtraction = ang_bin_values_bounds_d[0] + ang_ratio*ang_sample_grid_batch_d[tid, yi, xi]
 
-      # Nominal noisy control
-      v_nom = useq_shared[t, 0]
-      w_nom = useq_shared[t, 1]
+      # # Nominal noisy control
+      # v_nom = useq_shared[t, 0]
+      # w_nom = useq_shared[t, 1]
+      v_nom = u_cur_d[t, 0]
+      w_nom = u_cur_d[t, 1]
       
       # Forward simulate
       x_curr[0] += dt_d*vtraction*v_nom*math.cos(x_curr[2])

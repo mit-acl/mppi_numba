@@ -13,8 +13,9 @@ class TDM_Visualizer(object):
 
     def __init__(self, tdm):
         self.semantic_grid_initialized = tdm.semantic_grid_initialized
-        self.num_rows = tdm.padded_num_rows
-        self.num_cols = tdm.padded_num_cols
+        return_v = tdm.get_padded_grid_xy_dim()
+        if return_v is not None:
+            self.num_rows, self.num_cols = return_v
         self.ylimits = copy.deepcopy(tdm.ylimits)
         self.xlimits = copy.deepcopy(tdm.xlimits)
 
@@ -33,7 +34,7 @@ class TDM_Visualizer(object):
         self.bin_values_bounds = copy.deepcopy(tdm.bin_values_bounds)
         
         # If padded, create new semantic_grid and update color (using black?)
-        self.pad_width = tdm.pad_width
+        self.pad_width = tdm.pad_cells
         self.id2name[-1] = "Padding"
         self.id2rgb[-1] = (0,0,0,)
 
