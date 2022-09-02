@@ -429,183 +429,6 @@ class MPPI_Numba(object):
 
   """GPU kernels"""
 
-  # @staticmethod
-  # @cuda.jit(fastmath=True)
-  # def rollout_numba(
-  #         lin_sample_grid_batch_d,
-  #         ang_sample_grid_batch_d,
-  #         lin_bin_values_bounds_d,
-  #         ang_bin_values_bounds_d,
-  #         res_d, 
-  #         xlimits_d, 
-  #         ylimits_d, 
-  #         vrange_d, 
-  #         wrange_d, 
-  #         xgoal_d, 
-  #         v_post_rollout_d, 
-  #         goal_tolerance_d, 
-  #         lambda_weight_d, 
-  #         u_std_d, 
-  #         cvar_alpha_d, 
-  #         x0_d, 
-  #         dt_d,
-  #         noise_samples_d,
-  #         u_cur_d,
-  #         costs_d):
-  #   """
-  #   Every thread in each block considers different traction grids but the same control sequence.
-  #   Each block produces a single result (reduce a shared list to produce CVaR or mean. Is there a more efficient way to do this?)
-  #   """
-  #   # Get block id and thread id
-  #   bid = cuda.blockIdx.x   # index of block
-  #   tid = cuda.threadIdx.x  # index of thread within a block
-
-  #   # Create shared array for saving temporary costs
-  #   block_width = cuda.blockDim.x
-  #   # thread_cost_shared = cuda.shared.array(NUM_GRID_SAMPLES, dtype=numba.float32)
-    
-  #   thread_cost_shared = cuda.shared.array(shape=0, dtype=numba.float32) # Use trick to dynamically allocate shared memory (only can be 1d)
-  #                                                                                 # https://stackoverflow.com/questions/30510580/numba-cuda-shared-memory-size-at-runtime
-  #   if (thread_cost_shared.shape[0]!=block_width):
-  #     print("WARNING: shared array doesn't have the correct size. Return")
-  #     return
-  #   thread_cost_shared[tid] = 0.0
-  #   # Sync before moving on
-  #   # cuda.syncthreads()
-  #   timesteps = len(u_cur_d)
-
-
-
-  #   # ----------------------------------------------------
-  #   # # Move control sequence to shared array as well
-  #   # useq_shared = cuda.shared.array((NUM_STEPS, 2), dtype=numba.float32) # can only initialize using constants..
-  #   # noise_shared = cuda.shared.array((NUM_STEPS, 2), dtype=numba.float32) # can only initialize using constants..
-    
-  #   # # Since each thread uses the same sequence, construct in shared memory
-  #   # num = math.ceil(timesteps/block_width)
-  #   # tstart = min(tid*num, timesteps)
-  #   # tend = min(tstart+num, timesteps)
-  #   # for i in range(tstart, tend):
-  #   #   useq_shared[i,0] = u_cur_d[i,0]
-  #   #   useq_shared[i,1] = u_cur_d[i,1]
-  #   #   noise_shared[i,0] = noise_samples_d[bid, i,0]
-  #   #   noise_shared[i,1] = noise_samples_d[bid, i,1]
-    
-  #   # # Sync before moving on
-  #   # cuda.syncthreads()
-  #   # ----------------------------------------------------
-  #   # Do not move to shared memory
-
-  #   # ----------------------------------------------------
-
-
-  #   # Explicit unicycle update and map lookup
-  #   # From here on we assume grid is properly padded so map lookup remains valid
-  #   height, width = lin_sample_grid_batch_d[tid].shape
-  #   x_curr = cuda.local.array(3, numba.float32)
-  #   for i in range(3): 
-  #     x_curr[i] = x0_d[i]
-
-  #   goal_reached = False
-  #   goal_tolerance_d2 = goal_tolerance_d*goal_tolerance_d
-  #   dist_to_goal2 = 1e9
-  #   v_nom =v_noisy = w_nom = w_noisy = 0.0
-
-  #   lin_ratio = 0.01*(lin_bin_values_bounds_d[1]-lin_bin_values_bounds_d[0])
-  #   ang_ratio = 0.01*(ang_bin_values_bounds_d[1]-ang_bin_values_bounds_d[0])
-
-  #   # PI2 = numba.float32(math.pi*2.0)
-    
-  #   for t in range(timesteps):
-  #     # Look up the traction parameters from map
-  #     xi = numba.int32((x_curr[0]-xlimits_d[0])//res_d)
-  #     yi = numba.int32((x_curr[1]-ylimits_d[0])//res_d)
-
-  #     # vtraction = lin_bin_values_bounds_d[0] + lin_ratio*lin_sample_grid_batch_d[tid, yi, xi]
-  #     # wtraction = ang_bin_values_bounds_d[0] + ang_ratio*ang_sample_grid_batch_d[tid, yi, xi]
-  #     vtraction = lin_bin_values_bounds_d[0]+lin_ratio*lin_sample_grid_batch_d[tid, yi, xi]
-  #     wtraction = ang_bin_values_bounds_d[0]+ang_ratio*ang_sample_grid_batch_d[tid, yi, xi]
-
-  #     # Nominal noisy control
-  #     # v_nom = useq_shared[t, 0] + noise_shared[t, 0]
-  #     # w_nom = useq_shared[t, 1] + noise_shared[t, 1]
-  #     v_nom = u_cur_d[t, 0] + noise_samples_d[bid, i,0]
-  #     w_nom = u_cur_d[t, 1] + noise_samples_d[bid, i,1]
-  #     v_noisy = max(vrange_d[0], min(vrange_d[1], v_nom))
-  #     w_noisy = max(wrange_d[0], min(wrange_d[1], w_nom))
-      
-  #     # Forward simulate
-  #     x_curr[0] += dt_d*vtraction*v_noisy*math.cos(x_curr[2])
-  #     x_curr[1] += dt_d*vtraction*v_noisy*math.sin(x_curr[2])
-  #     x_curr[2] += dt_d*wtraction*w_noisy
-
-  #     # Clip angle values within [0, 2pi] (Hmm don't think is needed)
-  #     # x_curr[2] = math.fmod(math.fmod(x_curr[2], PI2)+PI2, PI2)
-
-  #     # Accumulate cost starting at the initial state
-  #     thread_cost_shared[tid]+=dt_d
-  #     if not goal_reached:
-  #       dist_to_goal2 = (xgoal_d[0]-x_curr[0])**2 + (xgoal_d[1]-x_curr[1])**2
-  #       if dist_to_goal2<= goal_tolerance_d2:
-  #         goal_reached = True
-  #         break
-      
-  #   # Accumulate terminal cost 
-  #   if not goal_reached:
-  #     thread_cost_shared[tid] += math.sqrt(dist_to_goal2)/v_post_rollout_d
-
-  #   # Accumulate the missing stage cost
-  #   for t in range(timesteps):
-  #     # thread_cost_shared[tid] += lambda_weight_d*(
-  #     #         (useq_shared[t,0]/(u_std_d[0]**2))*noise_shared[t,0] + (useq_shared[t,1]/(u_std_d[1]**2))*noise_shared[t, 1])
-  #     thread_cost_shared[tid] += lambda_weight_d*(
-  #             (u_cur_d[t,0]/(u_std_d[0]**2))*noise_samples_d[bid,t,0] + (u_cur_d[t,1]/(u_std_d[1]**2))*noise_samples_d[bid,t, 1])
-
-  #   # Reudce thread_cost_shared to a single value (mean or CVaR)
-  #   cuda.syncthreads()  # make sure all threads have produced costs
-
-  #   # print(thread_cost_shared[tid])
-
-  #   numel = block_width
-  #   if cvar_alpha_d<1:
-  #     numel = math.ceil(block_width*cvar_alpha_d)
-  #     # --- CVaR requires sorting the elements ---
-  #     # First sort the costs from descending order via parallel bubble sort
-  #     # https://stackoverflow.com/questions/42620649/sorting-algorithm-with-cuda-inside-or-outside-kernels
-  #     for i in range(math.ceil(block_width/2)):
-  #       # Odd
-  #       if (tid%2==0) and ((tid+1)!=block_width):
-  #         if thread_cost_shared[tid+1]>thread_cost_shared[tid]:
-  #           # swap
-  #           temp = thread_cost_shared[tid]
-  #           thread_cost_shared[tid] = thread_cost_shared[tid+1]
-  #           thread_cost_shared[tid+1] = temp
-  #       cuda.syncthreads()
-  #       # Even
-  #       if (tid%2==1) and ((tid+1)!=block_width):
-  #         if thread_cost_shared[tid+1]>thread_cost_shared[tid]:
-  #           # swap
-  #           temp = thread_cost_shared[tid]
-  #           thread_cost_shared[tid] = thread_cost_shared[tid+1]
-  #           thread_cost_shared[tid+1] = temp
-  #       cuda.syncthreads()
-
-  #   # Average reduction based on quantile (all elements for cvar_alpha_d==1)
-  #   # The mean of the first alpha% will be the CVaR
-  #   numel = math.ceil(block_width*cvar_alpha_d)
-  #   s = 1
-  #   while s < numel:
-  #     if (tid % (2 * s) == 0) and ((tid + s) < numel):
-  #       # Stride by `s` and add
-  #       thread_cost_shared[tid] += thread_cost_shared[tid + s]
-  #     s *= 2
-  #     cuda.syncthreads()
-
-  #   # After the loop, the zeroth  element contains the sum
-  #   if tid == 0:
-  #     costs_d[bid] = thread_cost_shared[0]/numel
-
-
   @staticmethod
   @cuda.jit(fastmath=True)
   def rollout_numba(
@@ -633,56 +456,26 @@ class MPPI_Numba(object):
     Every thread in each block considers different traction grids but the same control sequence.
     Each block produces a single result (reduce a shared list to produce CVaR or mean. Is there a more efficient way to do this?)
     """
-
-    NUM_GRID_SAMPLES=1024
-    NUM_STEPS=100
-
-    # Get block id and thread id
+    # Basic info
     bid = cuda.blockIdx.x   # index of block
     tid = cuda.threadIdx.x  # index of thread within a block
+    block_width = cuda.blockDim.x
+    timesteps = len(u_cur_d)
 
     # Create shared array for saving temporary costs
-    block_width = cuda.blockDim.x
-    thread_cost_shared = cuda.shared.array(NUM_GRID_SAMPLES, dtype=numba.float32)
-    
-    # thread_cost_shared = cuda.shared.array(shape=0, dtype=numba.float32) # Use trick to dynamically allocate shared memory (only can be 1d)
-    #                                                                               # https://stackoverflow.com/questions/30510580/numba-cuda-shared-memory-size-at-runtime
+    # Use trick to dynamically allocate shared memory (only can be 1d)
+    # https://stackoverflow.com/questions/30510580/numba-cuda-shared-memory-size-at-runtime
+    thread_cost_shared = cuda.shared.array(shape=0, dtype=numba.float32)
     # if (thread_cost_shared.shape[0]!=block_width):
     #   print("WARNING: shared array doesn't have the correct size. Return")
     #   return
 
-
     thread_cost_shared[tid] = 0.0
-    timesteps = len(u_cur_d)
-
-
-
-    # ----------------------------------------------------
-    # Move control sequence to shared array as well
-    useq_shared = cuda.shared.array((NUM_STEPS, 2), dtype=numba.float32) # can only initialize using constants..
-    noise_shared = cuda.shared.array((NUM_STEPS, 2), dtype=numba.float32) # can only initialize using constants..
-    
-    # Since each thread uses the same sequence, construct in shared memory
-    num = math.ceil(timesteps/block_width)
-    tstart = min(tid*num, timesteps)
-    tend = min(tstart+num, timesteps)
-    for i in range(tstart, tend):
-      useq_shared[i,0] = u_cur_d[i,0]
-      useq_shared[i,1] = u_cur_d[i,1]
-      noise_shared[i,0] = noise_samples_d[bid, i,0]
-      noise_shared[i,1] = noise_samples_d[bid, i,1]
-    
-    # Sync before moving on
-    cuda.syncthreads()
-    # ----------------------------------------------------
-    # Do not move to shared memory
-
-    # ----------------------------------------------------
-
+    cuda.syncthreads() # Sync before moving on
 
     # Explicit unicycle update and map lookup
     # From here on we assume grid is properly padded so map lookup remains valid
-    height, width = lin_sample_grid_batch_d[tid].shape
+    # height, width = lin_sample_grid_batch_d[tid].shape
     x_curr = cuda.local.array(3, numba.float32)
     for i in range(3): 
       x_curr[i] = x0_d[i]
@@ -708,10 +501,10 @@ class MPPI_Numba(object):
       wtraction = ang_bin_values_bounds_d[0]+ang_ratio*ang_sample_grid_batch_d[tid, yi, xi]
 
       # Nominal noisy control
-      v_nom = useq_shared[t, 0] + noise_shared[t, 0]
-      w_nom = useq_shared[t, 1] + noise_shared[t, 1]
-      # v_nom = u_cur_d[t, 0] + noise_samples_d[bid, i,0]
-      # w_nom = u_cur_d[t, 1] + noise_samples_d[bid, i,1]
+      # v_nom = useq_shared[t, 0] + noise_shared[t, 0]
+      # w_nom = useq_shared[t, 1] + noise_shared[t, 1]
+      v_nom = u_cur_d[t, 0] + noise_samples_d[bid, t,0]
+      w_nom = u_cur_d[t, 1] + noise_samples_d[bid, t,1]
       v_noisy = max(vrange_d[0], min(vrange_d[1], v_nom))
       w_noisy = max(wrange_d[0], min(wrange_d[1], w_nom))
       
@@ -737,10 +530,10 @@ class MPPI_Numba(object):
 
     # Accumulate the missing stage cost
     for t in range(timesteps):
-      thread_cost_shared[tid] += lambda_weight_d*(
-              (useq_shared[t,0]/(u_std_d[0]**2))*noise_shared[t,0] + (useq_shared[t,1]/(u_std_d[1]**2))*noise_shared[t, 1])
       # thread_cost_shared[tid] += lambda_weight_d*(
-              # (u_cur_d[t,0]/(u_std_d[0]**2))*noise_samples_d[bid,t,0] + (u_cur_d[t,1]/(u_std_d[1]**2))*noise_samples_d[bid,t, 1])
+      #         (useq_shared[t,0]/(u_std_d[0]**2))*noise_shared[t,0] + (useq_shared[t,1]/(u_std_d[1]**2))*noise_shared[t, 1])
+      thread_cost_shared[tid] += lambda_weight_d*(
+              (u_cur_d[t,0]/(u_std_d[0]**2))*noise_samples_d[bid,t,0] + (u_cur_d[t,1]/(u_std_d[1]**2))*noise_samples_d[bid,t, 1])
 
     # Reudce thread_cost_shared to a single value (mean or CVaR)
     cuda.syncthreads()  # make sure all threads have produced costs
@@ -785,6 +578,187 @@ class MPPI_Numba(object):
     # After the loop, the zeroth  element contains the sum
     if tid == 0:
       costs_d[bid] = thread_cost_shared[0]/numel
+
+
+  # @staticmethod
+  # @cuda.jit(fastmath=True)
+  # def rollout_numba(
+  #         lin_sample_grid_batch_d,
+  #         ang_sample_grid_batch_d,
+  #         lin_bin_values_bounds_d,
+  #         ang_bin_values_bounds_d,
+  #         res_d, 
+  #         xlimits_d, 
+  #         ylimits_d, 
+  #         vrange_d, 
+  #         wrange_d, 
+  #         xgoal_d, 
+  #         v_post_rollout_d, 
+  #         goal_tolerance_d, 
+  #         lambda_weight_d, 
+  #         u_std_d, 
+  #         cvar_alpha_d, 
+  #         x0_d, 
+  #         dt_d,
+  #         noise_samples_d,
+  #         u_cur_d,
+  #         costs_d):
+  #   """
+  #   Every thread in each block considers different traction grids but the same control sequence.
+  #   Each block produces a single result (reduce a shared list to produce CVaR or mean. Is there a more efficient way to do this?)
+  #   """
+
+  #   NUM_GRID_SAMPLES=1024
+  #   NUM_STEPS=100
+
+  #   # Get block id and thread id
+  #   bid = cuda.blockIdx.x   # index of block
+  #   tid = cuda.threadIdx.x  # index of thread within a block
+
+  #   # Create shared array for saving temporary costs
+  #   block_width = cuda.blockDim.x
+  #   thread_cost_shared = cuda.shared.array(NUM_GRID_SAMPLES, dtype=numba.float32)
+    
+  #   # thread_cost_shared = cuda.shared.array(shape=0, dtype=numba.float32) # Use trick to dynamically allocate shared memory (only can be 1d)
+  #   #                                                                               # https://stackoverflow.com/questions/30510580/numba-cuda-shared-memory-size-at-runtime
+  #   # if (thread_cost_shared.shape[0]!=block_width):
+  #   #   print("WARNING: shared array doesn't have the correct size. Return")
+  #   #   return
+
+
+  #   thread_cost_shared[tid] = 0.0
+  #   timesteps = len(u_cur_d)
+
+
+
+  #   # ----------------------------------------------------
+  #   # Move control sequence to shared array as well
+  #   useq_shared = cuda.shared.array((NUM_STEPS, 2), dtype=numba.float32) # can only initialize using constants..
+  #   noise_shared = cuda.shared.array((NUM_STEPS, 2), dtype=numba.float32) # can only initialize using constants..
+    
+  #   # Since each thread uses the same sequence, construct in shared memory
+  #   num = math.ceil(timesteps/block_width)
+  #   tstart = min(tid*num, timesteps)
+  #   tend = min(tstart+num, timesteps)
+  #   for i in range(tstart, tend):
+  #     useq_shared[i,0] = u_cur_d[i,0]
+  #     useq_shared[i,1] = u_cur_d[i,1]
+  #     noise_shared[i,0] = noise_samples_d[bid, i,0]
+  #     noise_shared[i,1] = noise_samples_d[bid, i,1]
+    
+  #   # Sync before moving on
+  #   cuda.syncthreads()
+  #   # ----------------------------------------------------
+  #   # Do not move to shared memory
+
+  #   # ----------------------------------------------------
+
+
+  #   # Explicit unicycle update and map lookup
+  #   # From here on we assume grid is properly padded so map lookup remains valid
+  #   height, width = lin_sample_grid_batch_d[tid].shape
+  #   x_curr = cuda.local.array(3, numba.float32)
+  #   for i in range(3): 
+  #     x_curr[i] = x0_d[i]
+
+  #   goal_reached = False
+  #   goal_tolerance_d2 = goal_tolerance_d*goal_tolerance_d
+  #   dist_to_goal2 = 1e9
+  #   v_nom =v_noisy = w_nom = w_noisy = 0.0
+
+  #   lin_ratio = 0.01*(lin_bin_values_bounds_d[1]-lin_bin_values_bounds_d[0])
+  #   ang_ratio = 0.01*(ang_bin_values_bounds_d[1]-ang_bin_values_bounds_d[0])
+
+  #   # PI2 = numba.float32(math.pi*2.0)
+    
+  #   for t in range(timesteps):
+  #     # Look up the traction parameters from map
+  #     xi = numba.int32((x_curr[0]-xlimits_d[0])//res_d)
+  #     yi = numba.int32((x_curr[1]-ylimits_d[0])//res_d)
+
+  #     # vtraction = lin_bin_values_bounds_d[0] + lin_ratio*lin_sample_grid_batch_d[tid, yi, xi]
+  #     # wtraction = ang_bin_values_bounds_d[0] + ang_ratio*ang_sample_grid_batch_d[tid, yi, xi]
+  #     vtraction = lin_bin_values_bounds_d[0]+lin_ratio*lin_sample_grid_batch_d[tid, yi, xi]
+  #     wtraction = ang_bin_values_bounds_d[0]+ang_ratio*ang_sample_grid_batch_d[tid, yi, xi]
+
+  #     # Nominal noisy control
+  #     v_nom = useq_shared[t, 0] + noise_shared[t, 0]
+  #     w_nom = useq_shared[t, 1] + noise_shared[t, 1]
+  #     # v_nom = u_cur_d[t, 0] + noise_samples_d[bid, i,0]
+  #     # w_nom = u_cur_d[t, 1] + noise_samples_d[bid, i,1]
+  #     v_noisy = max(vrange_d[0], min(vrange_d[1], v_nom))
+  #     w_noisy = max(wrange_d[0], min(wrange_d[1], w_nom))
+      
+  #     # Forward simulate
+  #     x_curr[0] += dt_d*vtraction*v_noisy*math.cos(x_curr[2])
+  #     x_curr[1] += dt_d*vtraction*v_noisy*math.sin(x_curr[2])
+  #     x_curr[2] += dt_d*wtraction*w_noisy
+
+  #     # Clip angle values within [0, 2pi] (Hmm don't think is needed)
+  #     # x_curr[2] = math.fmod(math.fmod(x_curr[2], PI2)+PI2, PI2)
+
+  #     # Accumulate cost starting at the initial state
+  #     thread_cost_shared[tid]+=dt_d
+  #     if not goal_reached:
+  #       dist_to_goal2 = (xgoal_d[0]-x_curr[0])**2 + (xgoal_d[1]-x_curr[1])**2
+  #       if dist_to_goal2<= goal_tolerance_d2:
+  #         goal_reached = True
+  #         break
+      
+  #   # Accumulate terminal cost 
+  #   if not goal_reached:
+  #     thread_cost_shared[tid] += math.sqrt(dist_to_goal2)/v_post_rollout_d
+
+  #   # Accumulate the missing stage cost
+  #   for t in range(timesteps):
+  #     thread_cost_shared[tid] += lambda_weight_d*(
+  #             (useq_shared[t,0]/(u_std_d[0]**2))*noise_shared[t,0] + (useq_shared[t,1]/(u_std_d[1]**2))*noise_shared[t, 1])
+  #     # thread_cost_shared[tid] += lambda_weight_d*(
+  #             # (u_cur_d[t,0]/(u_std_d[0]**2))*noise_samples_d[bid,t,0] + (u_cur_d[t,1]/(u_std_d[1]**2))*noise_samples_d[bid,t, 1])
+
+  #   # Reudce thread_cost_shared to a single value (mean or CVaR)
+  #   cuda.syncthreads()  # make sure all threads have produced costs
+
+  #   # print(thread_cost_shared[tid])
+
+  #   numel = block_width
+  #   if cvar_alpha_d<1:
+  #     numel = math.ceil(block_width*cvar_alpha_d)
+  #     # --- CVaR requires sorting the elements ---
+  #     # First sort the costs from descending order via parallel bubble sort
+  #     # https://stackoverflow.com/questions/42620649/sorting-algorithm-with-cuda-inside-or-outside-kernels
+  #     for i in range(math.ceil(block_width/2)):
+  #       # Odd
+  #       if (tid%2==0) and ((tid+1)!=block_width):
+  #         if thread_cost_shared[tid+1]>thread_cost_shared[tid]:
+  #           # swap
+  #           temp = thread_cost_shared[tid]
+  #           thread_cost_shared[tid] = thread_cost_shared[tid+1]
+  #           thread_cost_shared[tid+1] = temp
+  #       cuda.syncthreads()
+  #       # Even
+  #       if (tid%2==1) and ((tid+1)!=block_width):
+  #         if thread_cost_shared[tid+1]>thread_cost_shared[tid]:
+  #           # swap
+  #           temp = thread_cost_shared[tid]
+  #           thread_cost_shared[tid] = thread_cost_shared[tid+1]
+  #           thread_cost_shared[tid+1] = temp
+  #       cuda.syncthreads()
+
+  #   # Average reduction based on quantile (all elements for cvar_alpha_d==1)
+  #   # The mean of the first alpha% will be the CVaR
+  #   numel = math.ceil(block_width*cvar_alpha_d)
+  #   s = 1
+  #   while s < numel:
+  #     if (tid % (2 * s) == 0) and ((tid + s) < numel):
+  #       # Stride by `s` and add
+  #       thread_cost_shared[tid] += thread_cost_shared[tid + s]
+  #     s *= 2
+  #     cuda.syncthreads()
+
+  #   # After the loop, the zeroth  element contains the sum
+  #   if tid == 0:
+  #     costs_d[bid] = thread_cost_shared[0]/numel
 
 
   @staticmethod
