@@ -147,11 +147,13 @@ class MPPI_Numba(object):
   def solve(self):
 
     if self.params['use_det_dynamics']:
+      print("MPPI uses CVAR dynamics.")
       return self.solve_det_dyn()
     elif self.params['use_nom_dynamics_with_speed_map'] or self.params["use_costmap"]:
-      # print("MPPI uses nominal dynamics with risk-adjusted cost.")
+      print("MPPI uses nominal dynamics with risk-adjusted cost.")
       return self.solve_nom_dyn_w_speed_map()
     else:
+      print("MPPI uses noisy unicycles")
       return self.solve_stochastic()
 
 
@@ -268,17 +270,28 @@ class MPPI_Numba(object):
     
     
     # Sample environment realizations for estimating cvar
+    # self.lin_tdm.print_bin_values_bounds("lin_tdm before init device var")
+    # self.ang_tdm.print_bin_values_bounds("ang_tdm before init device var")
+    
     self.lin_tdm.init_device_vars_before_sampling(det_dyn=True)
     self.ang_tdm.init_device_vars_before_sampling(det_dyn=True)
+    
+    self.lin_tdm.print_bin_values_bounds("lin_tdm after init device var")
+    self.ang_tdm.print_bin_values_bounds("ang_tdm after init device var")
+    
     lin_sample_grid_batch_d = self.lin_tdm.sample_grids(det_dyn=True) # get ref to device samples
     ang_sample_grid_batch_d = self.ang_tdm.sample_grids(det_dyn=True) # get ref to device samples
+
+    self.lin_tdm.print_bin_values_bounds("lin_tdm after sample grid")
+    self.ang_tdm.print_bin_values_bounds("ang_tdm after sample grid")
 
     # Optimization loop
     for k in range(self.params['num_opt']):
       # Sample control noise
       self.sample_noise_numba[cfg.num_control_rollouts, cfg.num_steps](
             self.rng_states_d, u_std_d, self.noise_samples_d)
-      
+      # self.lin_tdm.print_bin_values_bounds("lin_tdm after sample noise")
+      # self.ang_tdm.print_bin_values_bounds("ang_tdm after sample noise")      
       # Rollout and compute mean or cvar
       self.rollout_det_dyn_numba[cfg.num_control_rollouts, 1](
         lin_sample_grid_batch_d,
@@ -303,7 +316,8 @@ class MPPI_Numba(object):
         # results
         self.costs_d
       )
-
+      # self.lin_tdm.print_bin_values_bounds("lin_tdm after rollout_det_dyn_numba")
+      # self.ang_tdm.print_bin_values_bounds("ang_tdm after rollout_det_dyn_numba")
       # Compute cost and update the optimal control on device
       self.update_useq_numba[1, 32](
         lambda_weight_d, 
@@ -540,8 +554,8 @@ class MPPI_Numba(object):
 
       # vtraction = lin_bin_values_bounds_d[0] + lin_ratio*lin_sample_grid_batch_d[tid, yi, xi]
       # wtraction = ang_bin_values_bounds_d[0] + ang_ratio*ang_sample_grid_batch_d[tid, yi, xi]
-      vtraction = lin_bin_values_bounds_d[0] + (lin_bin_values_bounds_d[0]+lin_ratio*lin_sample_grid_batch_d[tid, yi, xi])
-      wtraction = ang_bin_values_bounds_d[0] + (ang_bin_values_bounds_d[0]+ang_ratio*ang_sample_grid_batch_d[tid, yi, xi])
+      vtraction = lin_bin_values_bounds_d[0]+lin_ratio*lin_sample_grid_batch_d[tid, yi, xi]
+      wtraction = ang_bin_values_bounds_d[0]+ang_ratio*ang_sample_grid_batch_d[tid, yi, xi]
 
       # Nominal noisy control
       v_nom = useq_shared[t, 0] + noise_shared[t, 0]
@@ -670,8 +684,8 @@ class MPPI_Numba(object):
       xi = numba.int32((x_curr[0]-xlimits_d[0])//res_d)
       yi = numba.int32((x_curr[1]-ylimits_d[0])//res_d)
 
-      vtraction = lin_bin_values_bounds_d[0] + (lin_bin_values_bounds_d[0]+lin_ratio*lin_sample_grid_batch_d[tid, yi, xi])
-      wtraction = ang_bin_values_bounds_d[0] + (ang_bin_values_bounds_d[0]+ang_ratio*ang_sample_grid_batch_d[tid, yi, xi])
+      vtraction = lin_bin_values_bounds_d[0]+lin_ratio*lin_sample_grid_batch_d[tid, yi, xi]
+      wtraction = ang_bin_values_bounds_d[0]+ang_ratio*ang_sample_grid_batch_d[tid, yi, xi]
 
       # Nominal noisy control
       v_nom = u_cur_d[t, 0] + noise_samples_d[bid, t, 0]
@@ -731,19 +745,13 @@ class MPPI_Numba(object):
     Every thread in each block considers different traction grids but the same control sequence.
     Each block produces a single result (reduce a shared list to produce CVaR or mean. Is there a more efficient way to do this?)
     """
-    print(0)
     UNKNOWN_COST_RATIO = 10.0# 10.0
     OBS_COST_RATIO = 10000.0
-
 
     # Get block id and thread id
     bid = cuda.blockIdx.x   # index of block
     # tid = cuda.threadIdx.x  # index of thread within a block
     costs_d[bid] = 0.0
-
-    if bid==0:
-      print(1)
-
 
     # Explicit unicycle update and map lookup
     # From here on we assume grid is properly padded so map lookup remains valid
@@ -762,8 +770,6 @@ class MPPI_Numba(object):
     lin_ratio = 0.01*(lin_bin_values_bounds_d[1]-lin_bin_values_bounds_d[0])
     # ang_ratio = 0.01*(ang_bin_values_bounds_d[1]-ang_bin_values_bounds_d[0])
 
-    if bid==0:
-      print(2)
     for t in range(timesteps):
       # Look up the traction parameters from map
       xi = numba.int32((x_curr[0]-xlimits_d[0])//res_d)
@@ -784,7 +790,7 @@ class MPPI_Numba(object):
 
       # If else statements will be expensive
       if lin_risk_traction_map_d[0, yi, xi]>=0:
-        vtraction = lin_bin_values_bounds_d[0] + (lin_bin_values_bounds_d[0]+lin_ratio*lin_risk_traction_map_d[0, yi, xi])
+        vtraction = lin_bin_values_bounds_d[0]+lin_ratio*lin_risk_traction_map_d[0, yi, xi]
         costs_d[bid]+=(dt_d/(vtraction+1e-6)) # avoid div by 0
       elif lin_risk_traction_map_d[0, yi, xi] == -1:
         costs_d[bid] += dt_d*UNKNOWN_COST_RATIO

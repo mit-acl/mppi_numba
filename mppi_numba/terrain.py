@@ -72,7 +72,8 @@ class TDM_Numba(object):
 
     def __init__(self, max_speed_padding=cfg.max_speed_padding, dt=cfg.dt, seed=1,
                 use_det_dynamics=False,
-                use_nom_dynamics_with_speed_map=False):
+                use_nom_dynamics_with_speed_map=False,
+                use_costmap=False):
 
         # Used for padding 0 traction regions around the map
         self.max_speed_padding = max_speed_padding
@@ -112,6 +113,7 @@ class TDM_Numba(object):
         # For variants of MPPI
         self.use_det_dynamics = use_det_dynamics
         self.use_nom_dynamics_with_speed_map = use_nom_dynamics_with_speed_map
+        self.use_costmap = use_costmap
         self.det_dynamics_cvar_alpha = None
 
         # Initialize batch_sample variables
@@ -126,7 +128,7 @@ class TDM_Numba(object):
 
 
         # Initialize the random seeds before hand. Somehow initialization later will freeze ros code.
-        self.det_dyn = (self.use_det_dynamics or self.use_nom_dynamics_with_speed_map)
+        self.det_dyn = (self.use_det_dynamics or self.use_nom_dynamics_with_speed_map or self.use_costmap)
         if not self.det_dyn:
             self.rng_states_d = create_xoroshiro128p_states(self.TOTAL_THREADS, seed=seed)
         else:
@@ -196,7 +198,9 @@ class TDM_Numba(object):
                                     break
                             break
                     # assert sum(self.pmf_grid[:,ri, ci])==100
-            
+
+ 
+
         # TODO: For loop is slow, use masking? 
         elif self.use_nom_dynamics_with_speed_map:
             # Set PMF to have 1 in the last bin
@@ -250,9 +254,9 @@ class TDM_Numba(object):
         #     print("Got costmap of dimension {} with unique values of {}".format(costmap_dict["costmap"].shape, set(costmap_dict["costmap"].flatten())))
         # else:
         #     return
+        assert self.use_costmap, "set_TDM_from_costmap is invoked when self.use_costmap is not True"
 
         start_t = time.time()
-
         costmap = costmap_dict["costmap"]
 
         # print("Received costmap array and configs: {}".format(costmap_dict))
@@ -269,7 +273,6 @@ class TDM_Numba(object):
         self.num_pmf_bins = 2 # costmap_dict["num_pmf_bins"]
         self.bin_values = np.array([0.0, 1.0], dtype=np.float32) # costmap_dict["bin_values"].astype(np.float32)
         self.bin_values_bounds = np.array([min(self.bin_values), max(self.bin_values)], dtype=np.float32) # costmap_dict["bin_values_bounds"].astype(np.float32)
-        # print(self.num_rows, self.num_pmf_bins, self.bin_values, self.bin_values_bounds)
 
         # Default to using nominal dynamics and risk-adjusted time cost
         assert (not self.use_det_dynamics) and (self.use_nom_dynamics_with_speed_map), "When using costmap, must have use_nom_dynamics_with_speed_map=True and use_det_dynamics=False"
@@ -281,14 +284,10 @@ class TDM_Numba(object):
         # # Initialize pmf grid
         # Account for padding
         self.pmf_grid = np.zeros((self.num_pmf_bins, self.num_rows, self.num_cols), dtype=np.int8)
-        
-        # Set PMF to have 1 in the last bin
-        self.pmf_grid[-1,:,:] = np.int8(100)
+        self.pmf_grid[-1] = np.int8(100) # Set PMF to have 1 in the last bin
 
         print("Took {} to initialize pmf grid".format(time.time()- start_t))
-
         start_t = time.time()
-
 
         # Generate the risk speed map (CVaR)
         # TODO: further speed-up is possible via GPU kernel
@@ -316,7 +315,11 @@ class TDM_Numba(object):
         print("Took {} to transfer procesed PMF grid to device".format(time.time()- start_t))
 
 
-
+    def print_bin_values_bounds(self, obj_name):
+        if self.bin_values_bounds_d is None:
+            print("{}: Bin value is None".format(obj_name))
+        else:
+            print("{}: bin values bounds are ".format(obj_name), self.bin_values_bounds_d.copy_to_host())
         
     def set_TDM_from_PMF_grid(self, pmf_grid, tdm_dict):
         # TODO: make sure parameters are all set properly
@@ -338,24 +341,33 @@ class TDM_Numba(object):
 
 
         # TODO: generate risk_traction_map for nominal dynamics planner
-        # TODO: generate modified PMF grid for cvar dynamics planner
         if self.use_det_dynamics:
             # Use modified PMF that has 100% prob mass at the bin that approximately equals cvar
             # Use dynamics computed based on cvar_alpha
             # Use CVaR dynamics (alpha=1 ==> mean dynamics)
             self.pmf_grid = np.zeros((self.num_pmf_bins, self.num_rows, self.num_cols), dtype=np.int8)
-            # TODO
-            
+            which_layer = np.argmax(pmf_grid.cumsum(axis=0)>=(100*tdm_dict["det_dynamics_cvar_alpha"]), axis=0)
+            self.pmf_grid[which_layer.ravel(), 
+                          np.repeat(np.arange(self.num_rows), self.num_cols), 
+                          np.tile(np.arange(self.num_cols), self.num_rows)] = np.int8(100)
+            assert (np.sum(self.pmf_grid, axis=0)==(np.ones((self.num_rows, self.num_cols))*100)).all()
+
 
         # TODO: For loop is slow, use masking? 
         elif self.use_nom_dynamics_with_speed_map:
             # set PMF to be nominal dynamics
             # Compute the risk traction map
             self.pmf_grid = np.zeros((self.num_pmf_bins, self.num_rows, self.num_cols), dtype=np.int8)
-            # TODO
+            self.pmf_grid[-1] = np.int8(100)
+            # TODO: compute the risk_traction_map
+
+            print("Traction map has not been implemented in 'set_TDM_from_PMF_grid' for flag self.use_nom_dynamics_with_speed_map")
+            assert False
+
         else:
             # For proposed method, use the existing PMF
             self.pmf_grid = np.asarray(pmf_grid).astype(np.int8)
+            
 
 
 
@@ -544,6 +556,8 @@ class TDM_Numba(object):
         thread_id = abs_tid_x*threads_y*blocks_y + abs_tid_y
         # print(thread_id)
         # cuda.syncthreads()
+        # a, b, c = grid_batch_d.shape
+        # print("grid_batch.shape", a, b, c, " pmf_grid.shape", num_bins, grid_rows, grid_cols)
 
         # Compute horizontal and vertical index range
         ri_start = min(tid_x*num_rows_entries_per_thread, grid_rows)
@@ -551,23 +565,34 @@ class TDM_Numba(object):
         ci_start = min(tid_y*num_col_entries_per_thread, grid_cols)
         ci_end = min(ci_start+num_col_entries_per_thread, grid_cols)
 
+        if (ri_end>grid_batch_d.shape[1]):
+            print("row idx out of bound ")
+
+        if (ci_end>grid_batch_d.shape[2]):
+            print("col idx out of bound ")
+
         traction_range = bin_values_bounds_d[1]-bin_values_bounds_d[0]
-        cum_pmf = np.int8(0)
-        sampled_cum_pmf = np.int8(8)
+        # cum_pmf = np.int8(0)
+        # sampled_cum_pmf = np.int8(0)
         for ri in range(ri_start, ri_end):
             for ci in range(ci_start, ci_end):
                 # Check which bin this belongs to
                 rand_num = xoroshiro128p_uniform_float32(rng_states_d, thread_id)
-                sampled_cum_pmf = rand_num*100.0
-                cum_pmf = 0
+                sampled_cum_pmf = np.int8(round(rand_num*100.0))
+                cum_pmf = np.int8(0)
                 for bi in range(num_bins):
                     cum_pmf += pmf_grid_d[bi, ri, ci]
                     if sampled_cum_pmf <= cum_pmf:
+                        before = grid_batch_d[block_id, ri, ci] # should be np.int8
+
                         grid_batch_d[block_id, ri, ci] = np.int8(100.*(bin_values_d[bi]-bin_values_bounds_d[0])/traction_range)
+                        
+                        
                         if grid_batch_d[block_id, ri, ci]<0:
-                            print("TDM sample_grids_numba experiences values < 0")
+                            print("TDM sample_grids_numba experiences values < 0. Before=", before, "now", grid_batch_d[block_id, ri, ci], "before in8 cast", 100.*(bin_values_d[bi]-bin_values_bounds_d[0])/traction_range)
+                            print("bin_values[", bi,"]=", bin_values_d[bi], " bin_values_bounds", bin_values_bounds_d[0], bin_values_bounds_d[1], "traction_range", traction_range)
                         break
-        cuda.syncthreads()
+        # cuda.syncthreads()
 
 
 
