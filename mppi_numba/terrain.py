@@ -86,6 +86,7 @@ class TDM_Numba(object):
         self.use_costmap = cfg.use_costmap
         self.det_dyn = self.use_det_dynamics or self.use_nom_dynamics_with_speed_map or self.use_costmap
 
+
         # Other TDM specific params from cfg
         self.thread_dim = self.tdm_sample_thread_dim
         self.block_dim = (1, self.num_grid_samples)
@@ -128,9 +129,6 @@ class TDM_Numba(object):
         self.res = None
         self.pmf_grid_initialized = False
 
-        # For variants of MPPI that use determinisitc dynamics (CVaR of traction)
-        self.det_dynamics_cvar_alpha = None
-
         # For visualization
         self.cell_dimensions = None
         self.figsize = None
@@ -146,7 +144,7 @@ class TDM_Numba(object):
             
             ## Allocate more than needed space to account for varying map size (crop if larger than expected)
             rows, cols = self.max_map_xy_dim
-
+        
             if not self.det_dyn:
                 self.rng_states_d = create_xoroshiro128p_states(self.total_threads, seed=self.seed)
                 self.sample_grid_batch_d = cuda.device_array((self.num_grid_samples, rows, cols), dtype=np.int8)
@@ -188,7 +186,7 @@ class TDM_Numba(object):
         self.bin_values = np.asarray(bin_values).astype(np.float32)
         self.bin_values_bounds = np.asarray(bin_values_bounds).astype(np.float32)
         self.res = res
-        self.det_dynamics_cvar_alpha = det_dynamics_cvar_alpha
+        # self.det_dynamics_cvar_alpha = det_dynamics_cvar_alpha
 
         assert bin_values[0]==0, "Assume minimum bin value is 0 for now"
         assert bin_values_bounds[0]==0, "Assume minimum traction is 0 for now"
@@ -294,11 +292,13 @@ class TDM_Numba(object):
                 ).astype(np.int8)
 
             else:
-                
+
+                # Up to which PMF bin?
                 which_layer = np.argmax(pmf_cumsum>=det_dynamics_cvar_alpha, axis=0)
                 l_indices = which_layer.ravel()
                 r_indices = np.repeat(np.arange(num_rows), num_cols)
                 c_indices = np.tile(np.arange(num_cols), num_rows)
+                # Conditional mean
                 cvars = weighted_v_cumsum[l_indices, r_indices, c_indices] / pmf_cumsum[l_indices, r_indices, c_indices].ravel()
                 risk_traction_map = np.reshape(
                     100*np.asarray((cvars.reshape(num_rows, num_cols)-self.bin_values_bounds[0])/traction_range),
@@ -346,12 +346,10 @@ class TDM_Numba(object):
 
     
     def set_TDM_from_costmap(self, costmap_dict):
-        # assert costmap_dict["use_costmap"]
-        # if "costmap" in costmap_dict:
-        #     print("Got costmap of dimension {} with unique values of {}".format(costmap_dict["costmap"].shape, set(costmap_dict["costmap"].flatten())))
-        # else:
-        #     return
+
         assert self.use_costmap, "set_TDM_from_costmap is invoked when self.use_costmap is not True"
+        
+        print('in set_TDM_from_Costmap')
 
         start_t = time.time()
         costmap = costmap_dict["costmap"]
@@ -372,11 +370,8 @@ class TDM_Numba(object):
         self.bin_values_bounds = np.array([min(self.bin_values), max(self.bin_values)], dtype=np.float32) # costmap_dict["bin_values_bounds"].astype(np.float32)
 
         # Default to using nominal dynamics and risk-adjusted time cost
-        assert (not self.use_det_dynamics) and (self.use_nom_dynamics_with_speed_map), "When using costmap, must have use_nom_dynamics_with_speed_map=True and use_det_dynamics=False"
+        # assert (not self.use_det_dynamics) and (self.use_nom_dynamics_with_speed_map), "When using costmap, must have use_nom_dynamics_with_speed_map=True and use_det_dynamics=False"
         
-        # self.use_det_dynamics = False
-        self.det_dynamics_cvar_alpha = costmap_dict["det_dynamics_cvar_alpha"]
-        # self.use_nom_dynamics_with_speed_map = True
 
         # # Initialize pmf grid
         # Account for padding
@@ -517,12 +512,12 @@ class TDM_Numba(object):
                     (1, num_rows, num_cols)).astype(np.int8)
                     
             else:
-                
-
+                # Up to which PMF bin?                
                 which_layer = np.argmax(pmf_cumsum>=tdm_dict["det_dynamics_cvar_alpha"], axis=0)
                 l_indices = which_layer.ravel()
                 r_indices = np.repeat(np.arange(num_rows), num_cols)
                 c_indices = np.tile(np.arange(num_cols), num_rows)
+                # Conditional mean
                 cvars = weighted_v_cumsum[l_indices, r_indices, c_indices] / pmf_cumsum[l_indices, r_indices, c_indices].ravel()
                 risk_traction_map = np.reshape(
                     100*np.asarray((cvars.reshape(num_rows, num_cols)-self.bin_values_bounds[0])/traction_range),

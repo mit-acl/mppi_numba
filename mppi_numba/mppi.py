@@ -281,8 +281,6 @@ class MPPI_Numba(object):
     
     
     # Sample environment realizations for estimating cvar
-    # self.lin_tdm.init_device_vars_before_sampling()
-    # self.ang_tdm.init_device_vars_before_sampling()
     lin_sample_grid_batch_d = self.lin_tdm.sample_grids() # get ref to device samples
     ang_sample_grid_batch_d = self.ang_tdm.sample_grids() # get ref to device samples
 
@@ -316,8 +314,7 @@ class MPPI_Numba(object):
         dt_d,
         self.noise_samples_d,
         self.u_cur_d,
-        # results
-        self.costs_d
+        self.costs_d # results
       )
 
       # Compute cost and update the optimal control on device
