@@ -4,7 +4,7 @@ gpu = cuda.get_current_device()
 max_threads_per_block = gpu.MAX_THREADS_PER_BLOCK
 max_square_block_dim = (int(gpu.MAX_BLOCK_DIM_X**0.5), int(gpu.MAX_BLOCK_DIM_X**0.5))
 max_blocks = gpu.MAX_GRID_DIM_X
-rec_max_control_rollouts = 3000
+rec_max_control_rollouts = 3000 # Though theoretically limited by max_blocks on GPU
 rec_min_control_rollouts = 100
 
 class Config:
@@ -27,23 +27,23 @@ class Config:
                use_costmap=False, # only applicable when interfacing with costmap2d in ROS
                ):
     
+    self.seed = seed
     self.use_tdm = use_tdm
     self.use_det_dynamics = use_det_dynamics
     self.use_nom_dynamics_with_speed_map = use_nom_dynamics_with_speed_map
     self.use_costmap = use_costmap
     num_true = sum([use_tdm, use_det_dynamics, use_nom_dynamics_with_speed_map, use_costmap])
-    if num_true==0 or num_true>1:
-      print("Only one of the use_tdm, use_det_dynamics, use_nom_dynamics_with_speed_map, use_costmap can be true. Use default use_tdm=true")
-      self.use_tdm = True
-      self.use_det_dynamics = False
-      self.use_nom_dynamics_with_speed_map = False
-      self.use_costmap = False
-
-
-    self.seed = seed
 
     assert T > 0
     assert dt > 0
+    assert T > dt
+    assert not (num_true==0 or num_true>1), "MPPI Config Error: Only one of the use_tdm, use_det_dynamics, use_nom_dynamics_with_speed_map, use_costmap can be true."
+    # if num_true==0 or num_true>1:
+    #   print("MPPI Config: Only one of the use_tdm, use_det_dynamics, use_nom_dynamics_with_speed_map, use_costmap can be true. Use default use_tdm=true")
+    #   self.use_tdm = True
+    #   self.use_det_dynamics = False
+    #   self.use_nom_dynamics_with_speed_map = False
+    #   self.use_costmap = False
 
     self.T = T
     self.dt = dt
@@ -54,20 +54,20 @@ class Config:
     self.num_grid_samples = num_grid_samples
     if self.num_grid_samples > max_threads_per_block:
       self.num_grid_samples = min([max_threads_per_block, self.num_grid_samples])
-      print("Currently limited by the threads in a block (<={})".format(max_threads_per_block))
+      print("MPPI Config: Currently limited by the threads in a block (<={})".format(max_threads_per_block))
     elif self.num_grid_samples < 1:
       self.num_grid_samples = 1
-      print("Set num_grid_samples from {} -> 1. Need at least 1 map to work with".format(num_grid_samples))
+      print("MPPI Config: Set num_grid_samples from {} -> 1. Need at least 1 map to work with".format(num_grid_samples))
     
     # Number of control rollouts are currently limited by the number of blocks
     self.num_control_rollouts = num_control_rollouts
     if self.num_control_rollouts > rec_max_control_rollouts:
       self.num_control_rollouts = rec_max_control_rollouts
-      print("Clip num_control_rollouts to be recommended max number of {}. (Max={})".format(
+      print("MPPI Config: Clip num_control_rollouts to be recommended max number of {}. (Max={})".format(
         rec_max_control_rollouts, max_blocks))
     elif self.num_control_rollouts < rec_min_control_rollouts:
       self.num_control_rollouts = rec_min_control_rollouts
-      print("Clip num_control_rollouts to be recommended min number of {}. (Recommended max={})".format(
+      print("MPPI Config: Clip num_control_rollouts to be recommended min number of {}. (Recommended max={})".format(
         rec_min_control_rollouts, rec_max_control_rollouts))
     
     self.max_speed_padding = max_speed_padding
@@ -79,9 +79,8 @@ class Config:
     requested_num_threads_tdm = self.tdm_sample_thread_dim[0]*self.tdm_sample_thread_dim[1]
     if requested_num_threads_tdm >= max_threads_per_block:
        self.tdm_sample_thread_dim = max_square_block_dim
-       print("Requested {} threads per block (more than max {}) for sampling tdm. Change tdm_sample_thread_dim to {}".format(
-        requested_num_threads_tdm, max_threads_per_block, max_square_block_dim
-       ))
+       print("MPPI Config: Requested {} threads per block (more than max {}) for sampling tdm. Change tdm_sample_thread_dim to {}".format(
+        requested_num_threads_tdm, max_threads_per_block, max_square_block_dim))
 
     # For visualizing state rollouts
     self.num_vis_state_rollouts = num_vis_state_rollouts

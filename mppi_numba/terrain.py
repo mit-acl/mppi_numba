@@ -11,6 +11,9 @@ from numba.cuda.random import create_xoroshiro128p_states, xoroshiro128p_uniform
 # TODO: import the control configurations from a config file?
 from .config import Config
 
+# Current implementation assumes traction ranges from 0 to 1.0, though not always explicitly checking these values.
+# Certain functions will break if the previous assumption is not true.
+
 # Terrain type has linear and angular traction parameters
 class Terrain(object):
     def __init__(self, name, rgb, lin_density, ang_density, cvar_alpha=0.1, cvar_front=True, num_saved_samples=1e4):
@@ -164,6 +167,12 @@ class TDM_Numba(object):
         initialize the PMF grid and copy to device. 
         Return: (pmf_grid, pmf_grid_d)
         """
+
+        if det_dynamics_cvar_alpha is None:
+            assert self.use_tdm or self.use_costmap
+        else:
+            assert det_dynamics_cvar_alpha >0 and det_dynamics_cvar_alpha<=1.0
+
         # Based on semantics, construct the grid 
         self.semantic_grid = sg.copy()
         self.id2name = id2name # dict[semantic_id]=>name
@@ -179,28 +188,22 @@ class TDM_Numba(object):
         self.bin_values = np.asarray(bin_values).astype(np.float32)
         self.bin_values_bounds = np.asarray(bin_values_bounds).astype(np.float32)
         self.res = res
+        self.det_dynamics_cvar_alpha = det_dynamics_cvar_alpha
+
         assert bin_values[0]==0, "Assume minimum bin value is 0 for now"
         assert bin_values_bounds[0]==0, "Assume minimum traction is 0 for now"
-        # assert not (use_det_dynamics and use_nom_dynamics_with_speed_map), \
-        #     "In 'set_TDM_from_semantic_grid', cannot set both use_det_dynamics and use_nom_dynamics_with_speed_map to True"
-        # assert (not use_det_dynamics) or (det_dynamics_cvar_alpha is not None), \
-        #     "When using deterministic dynamics, det_dynamics_cvar_alpha must be set."
 
-        # self.use_det_dynamics = use_det_dynamics
-        self.det_dynamics_cvar_alpha = det_dynamics_cvar_alpha
-        # self.use_nom_dynamics_with_speed_map = use_nom_dynamics_with_speed_map
-
-        # Initialize pmf grid
-        # Account for padding
+        # Initialize pmf grid and account for padding
         self.pmf_grid = np.zeros((self.num_pmf_bins, num_rows, num_cols), dtype=np.int8)
         
-        # TODO: For loop is slow, use masking? 
         if self.use_det_dynamics:
             # Use dynamics computed based on cvar_alpha
             # Use CVaR dynamics (alpha=1 ==> mean dynamics)
             for ri in range(num_rows):
                 for ci in range(num_cols):
+                    
                     if det_dynamics_cvar_alpha==1.0:
+                        # Simple weighted sum. (There could be numerical issues with the "else" clause when a float number is compared to cvar_alpha==1) 
                         terrain = self.id2terrain_fn(self.semantic_grid[ri, ci])
                         values, pmf = self.terrain2pmf[terrain]
                         expected_traction = 0.0
@@ -212,6 +215,7 @@ class TDM_Numba(object):
                                 self.pmf_grid[bin_i, ri, ci] = np.int8(100)
                                 break
                     else:
+                        # Expected value in the west-alpha percentile
                         terrain = self.id2terrain_fn(self.semantic_grid[ri, ci])
                         values, pmf = self.terrain2pmf[terrain]
                         cum_sum = 0.0
@@ -228,32 +232,78 @@ class TDM_Numba(object):
                                         self.pmf_grid[bin_i, ri, ci] = np.int8(100)
                                         break
                                 break
-                    # assert sum(self.pmf_grid[:,ri, ci])==100
-
+                    assert sum(self.pmf_grid[:,ri, ci])==100
+            # print(np.argmax(self.pmf_grid, axis=0))
  
 
-        # TODO: For loop is slow, use masking? 
         elif self.use_nom_dynamics_with_speed_map:
-            # Set PMF to have 1 in the last bin
-            self.pmf_grid[-1,:,:] = np.int8(100)
 
-            # Generate the risk speed map (CVaR)
-            risk_traction_map = np.zeros((1, num_rows, num_cols), dtype=np.int8)
+
+            #------------ Part of this is wrong ----------------------
+            # # Set PMF to have 1 in the last bin
+            # self.pmf_grid[-1,:,:] = np.int8(100)
+            # # Generate the risk speed map (CVaR)
+            # risk_traction_map = np.zeros((1, num_rows, num_cols), dtype=np.int8)
+            # traction_range = self.bin_values_bounds[1] - self.bin_values_bounds[0]
+
+            # if det_dynamics_cvar_alpha==1.0:
+            #     # This is WRONG for risk traction map. Need to compute the expeted value
+            #     risk_traction_map[0, :, :] = np.int8(100)
+            # else:
+            #     for ri in range(num_rows):
+            #         for ci in range(num_cols):
+            #             terrain = self.id2terrain_fn(self.semantic_grid[ri, ci])
+            #             values, pmf = self.terrain2pmf[terrain]
+            #             cum_sum = 0.0
+            #             expected_traction = 0.0
+            #             for val, m in zip(values, pmf):
+            #                 cum_sum += m
+            #                 expected_traction += m*val
+            #                 if cum_sum >= det_dynamics_cvar_alpha:
+            #                     if cum_sum > 0:
+            #                         expected_traction /= cum_sum
+            #                     risk_traction_map[0, ri, ci] = np.int8(100*(expected_traction-self.bin_values_bounds[0])/traction_range)
+            #                     break
+
+            # ----------------------------------
+            self.pmf_grid[-1,:,:] = np.int8(100)
+            num_rows, num_cols = self.semantic_grid.shape
+            unique_ids = np.unique(self.semantic_grid)
+            id_2_values_and_pmf = {sid: self.terrain2pmf[self.id2terrain_fn(sid)] 
+                                    for sid in unique_ids}
+            num_layers = len(id_2_values_and_pmf[unique_ids[0]][1])
+            pmf_grid = np.zeros((num_layers, num_rows, num_cols), dtype=float) # Here each axis=0 actually sums to 1 (float) like normal PMF
+            bin_values_grid = np.zeros((num_layers, num_rows, num_cols), dtype=float) 
+            # fill pmf_grid with values
+            for id in unique_ids:
+                values, pmf = id_2_values_and_pmf[id]
+                pmf_grid[:,self.semantic_grid==id] = np.reshape(pmf, (num_layers, 1))
+                bin_values_grid[:,self.semantic_grid==id] = np.reshape(values, (num_layers, 1))
+            
+            pmf_cumsum = pmf_grid.cumsum(axis=0)
+            weighted_values = pmf_grid * bin_values_grid
+            weighted_v_cumsum = np.cumsum(weighted_values, axis=0)
             traction_range = self.bin_values_bounds[1] - self.bin_values_bounds[0]
-            for ri in range(num_rows):
-                for ci in range(num_cols):
-                    terrain = self.id2terrain_fn(self.semantic_grid[ri, ci])
-                    values, pmf = self.terrain2pmf[terrain]
-                    cum_sum = 0.0
-                    expected_traction = 0.0
-                    for val, m in zip(values, pmf):
-                        cum_sum += m
-                        expected_traction += m*val
-                        if cum_sum >= det_dynamics_cvar_alpha:
-                            if cum_sum > 0:
-                                expected_traction /= cum_sum
-                            risk_traction_map[0, ri, ci] = np.int8(100*(expected_traction-self.bin_values_bounds[0])/traction_range)
-                            break
+            
+            if det_dynamics_cvar_alpha == 1.0:
+                # risk_traction_map = np.int8(100) * np.ones((1, num_rows, num_cols), dtype=np.int8)
+                # Find mean traction values
+                risk_traction_map = np.reshape(
+                    100*(weighted_v_cumsum[-1]-self.bin_values_bounds[0])/traction_range,
+                    (1, num_rows, num_cols)
+                ).astype(np.int8)
+
+            else:
+                
+                which_layer = np.argmax(pmf_cumsum>=det_dynamics_cvar_alpha, axis=0)
+                l_indices = which_layer.ravel()
+                r_indices = np.repeat(np.arange(num_rows), num_cols)
+                c_indices = np.tile(np.arange(num_cols), num_rows)
+                cvars = weighted_v_cumsum[l_indices, r_indices, c_indices] / pmf_cumsum[l_indices, r_indices, c_indices].ravel()
+                risk_traction_map = np.reshape(
+                    100*np.asarray((cvars.reshape(num_rows, num_cols)-self.bin_values_bounds[0])/traction_range),
+                    (1,num_rows,num_cols)
+                ).astype(np.int8)
 
             self.risk_traction_map_d = cuda.to_device(risk_traction_map)
 
@@ -269,8 +319,10 @@ class TDM_Numba(object):
                     # Make sure cum sum is 100
                     self.pmf_grid[-1, ri, ci] = np.int8(100)-np.sum(self.pmf_grid[:-1, ri, ci])
 
+                    assert sum(self.pmf_grid[:,ri, ci])==100
+
         else:
-            assert False
+            assert False, "TDM cannot be set up"
         
         padded_pmf_grid, self.padded_xlimits, self.padded_ylimits = self.set_padding(self.pmf_grid, self.max_speed_padding, self.dt, res,
                                                             xlimits, ylimits)
@@ -370,7 +422,12 @@ class TDM_Numba(object):
             print("{}: bin values bounds are ".format(obj_name), self.bin_values_bounds_d.copy_to_host())
         
     def set_TDM_from_PMF_grid(self, pmf_grid, tdm_dict):
-
+        # Code for interfacing PMF values from cpp interface
+        # Input pmf_grid has shape (num_bins, num_rows, num_cols), where all bins sum to 100 for (row, col)
+        if not (tdm_dict["det_dynamics_cvar_alpha"]>0 and tdm_dict["det_dynamics_cvar_alpha"]<=1.0 ):
+            print("WARNING: TDM cannot be setup since alpha is not in (0,1]")
+        assert tdm_dict["det_dynamics_cvar_alpha"]>0
+        assert tdm_dict["det_dynamics_cvar_alpha"]<=1.0
         assert len(pmf_grid.shape)==3, "PMF grid must have 3 dimensions"
         self.num_pmf_bins, num_rows, num_cols = pmf_grid.shape
         self.res = res = tdm_dict["res"]
@@ -380,51 +437,109 @@ class TDM_Numba(object):
 
         self.bin_values = np.asarray(tdm_dict["bin_values"]).astype(np.float32)
         self.bin_values_bounds = np.asarray(tdm_dict["bin_values_bounds"]).astype(np.float32)
-        print(self.bin_values, self.bin_values_bounds)
         assert self.bin_values[0]==0, "Assume minimum bin value is 0 for now"
         assert self.bin_values_bounds[0]==0, "Assume minimum traction is 0 for now"
         self.bin_values_d = cuda.to_device(self.bin_values)
         self.bin_values_bounds_d = cuda.to_device(self.bin_values_bounds)
 
 
-        # TODO: generate risk_traction_map for nominal dynamics planner
+        # TODO: Debug new implementation
         if self.use_det_dynamics:
+            if (np.sum(pmf_grid, axis=0)!=100).any():
+                print("WARNING: the provided PMF has columns that don't sum up to 100: {}".fromat(
+                    np.argwhere(np.sum(pmf_cumsum, axis=0)!=100)))
+            
             # Use modified PMF that has 100% prob mass at the bin that approximately equals cvar
             # Use dynamics computed based on cvar_alpha
             # Use CVaR dynamics (alpha=1 ==> mean dynamics)
             self.pmf_grid = np.zeros((self.num_pmf_bins, num_rows, num_cols), dtype=np.int8)
-            which_layer = np.argmax(pmf_grid.cumsum(axis=0)>=(100*tdm_dict["det_dynamics_cvar_alpha"]), axis=0)
-            self.pmf_grid[which_layer.ravel(), 
-                          np.repeat(np.arange(num_rows), num_cols), 
-                          np.tile(np.arange(num_cols), num_rows)] = np.int8(100)
-            assert (np.sum(self.pmf_grid, axis=0)==(np.ones((num_rows, num_cols))*100)).all()
+
+            # Process the incoming data
+            pmf_cumsum = 0.01*pmf_grid.cumsum(axis=0).astype(float) # summed to 1 (float)
+            weighted_values = 0.01* (pmf_grid.astype(float)) * self.bin_values.reshape((-1,1,1)) 
+            weighted_v_cumsum = np.cumsum(weighted_values, axis=0) # sum to 1 (float)
+
+            r_indices = np.repeat(np.arange(num_rows), num_cols)
+            c_indices = np.tile(np.arange(num_cols), num_rows)
+            
+            # Why handling cvar_alpha==1.0 separately? Sometimes computed float that's close to 1.0 does not get recognized as >=1
+            if (tdm_dict["det_dynamics_cvar_alpha"]==1.0):
+                # Compute the expected dynamics (true mean, not scaled by 100)
+                means = weighted_v_cumsum[-1]
+
+                # Compute which bin is the approximation (which layer in each x y location)
+                which_layer = np.argmax(means <=self.bin_values.reshape((-1, 1, 1)), axis=0)
+                l_indices = which_layer.ravel()
+                self.pmf_grid[l_indices, r_indices, c_indices] = np.int8(100)
+
+            else:
+                # Find up to which bins the CVaR values should be computed
+                upto_which_layer_to_compute_cvar = np.argmax(pmf_cumsum<=tdm_dict["det_dynamics_cvar_alpha"], axis=0)
+                l_indices_to_compute_cvar = upto_which_layer_to_compute_cvar.ravel()
+                # Compute the CVaR by dividing the total mass of the worst-percentiles
+                cvars = (weighted_v_cumsum[l_indices_to_compute_cvar, r_indices, c_indices] / \
+                    pmf_cumsum[l_indices_to_compute_cvar, r_indices, c_indices]).reshape((num_rows, num_cols))
+                
+                # Find the bins that approximate this CVaR
+                which_layer = np.argmax(cvars <=self.bin_values.reshape((-1, 1, 1)), axis=0)
+                l_indices = which_layer.ravel()
+                self.pmf_grid[l_indices, r_indices, c_indices] = np.int8(100)
+
+            # assert (np.sum(self.pmf_grid, axis=0)==(np.ones((num_rows, num_cols))*100)).all()
+            if (np.sum(self.pmf_grid, axis=0)!=(np.ones((num_rows, num_cols))*100)).all():
+                print("WARNING: pmf_grid not properly set in set_TDM_from_PMF_grid. Values don't' sum to 100")
 
 
-        # TODO: For loop is slow, use masking? 
+        # TODO: debug in sim
         elif self.use_nom_dynamics_with_speed_map:
-            # set PMF to be nominal dynamics
-            # Compute the risk traction map
+            if (np.sum(pmf_grid, axis=0)!=100).any():
+                print("WARNING: the provided PMF has columns that don't sum up to 100: {}".fromat(
+                    np.argwhere(np.sum(pmf_cumsum, axis=0)!=100)))
+            
+            # Use modified PMF that has 100% prob mass at the bin that approximately equals cvar
+            # Use dynamics computed based on cvar_alpha
+            # Use CVaR dynamics (alpha=1 ==> mean dynamics)
             self.pmf_grid = np.zeros((self.num_pmf_bins, num_rows, num_cols), dtype=np.int8)
-            self.pmf_grid[-1] = np.int8(100)
-            # TODO: compute the risk_traction_map
+            self.pmf_grid[-1] = np.int8(100) # last layer == 100 implies that nominal dynamics (traction==1)will be used
 
-            print("Traction map has not been implemented in 'set_TDM_from_PMF_grid' for flag self.use_nom_dynamics_with_speed_map")
-            assert False
+            # Process the incoming data
+            pmf_cumsum = 0.01*pmf_grid.cumsum(axis=0).astype(float) # summed to 1 (float)
+            weighted_values = 0.01* (pmf_grid.astype(float)) * self.bin_values.reshape((-1,1,1)) 
+            weighted_v_cumsum = np.cumsum(weighted_values, axis=0) # sum to 1 (float)
+
+            traction_range = self.bin_values_bounds[1] - self.bin_values_bounds[0]
+
+            # Compute 
+            if tdm_dict["det_dynamics_cvar_alpha"]==1.0:
+                # Compute the expected dynamics (true mean, not scaled by 100)
+                risk_traction_map = np.reshape(
+                    100*(weighted_v_cumsum[-1]-self.bin_values_bounds[0])/traction_range,
+                    (1, num_rows, num_cols)).astype(np.int8)
+                    
+            else:
+                
+
+                which_layer = np.argmax(pmf_cumsum>=tdm_dict["det_dynamics_cvar_alpha"], axis=0)
+                l_indices = which_layer.ravel()
+                r_indices = np.repeat(np.arange(num_rows), num_cols)
+                c_indices = np.tile(np.arange(num_cols), num_rows)
+                cvars = weighted_v_cumsum[l_indices, r_indices, c_indices] / pmf_cumsum[l_indices, r_indices, c_indices].ravel()
+                risk_traction_map = np.reshape(
+                    100*np.asarray((cvars.reshape(num_rows, num_cols)-self.bin_values_bounds[0])/traction_range),
+                    (1,num_rows,num_cols)).astype(np.int8)
+
+            self.risk_traction_map_d = cuda.to_device(risk_traction_map)
 
         else:
             # For proposed method, use the existing PMF
             self.pmf_grid = np.asarray(pmf_grid).astype(np.int8)
             
+        if (np.sum(self.pmf_grid, axis=0)!=100).any():
+            print("WARNING: some PMF columns do not sum to 100: {}".format(np.argwhere(np.sum(self.pmf_grid, axis=0)!=100)))
 
         padded_pmf_grid, self.padded_xlimits, self.padded_ylimits = self.set_padding(self.pmf_grid, self.max_speed_padding, self.dt, res,
                                                             self.xlimits, self.ylimits)
         self.pmf_grid_d = cuda.to_device(padded_pmf_grid)
-
-        # How to ensure the padded map fits properly in the allocated device memory?
-        # Check dimension 
-        # Get max col and max rows to sample over (must be the min of allocated and provided pmf)
-        # Store this info in class variable 
-
         self.pmf_grid_initialized = True
 
         
