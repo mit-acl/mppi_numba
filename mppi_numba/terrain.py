@@ -96,6 +96,8 @@ class TDM_Numba(object):
         # Reuseable device memory
         self.sample_grid_batch_d = None
         self.risk_traction_map_d = None # for adjusting time cost
+        self.obstacle_map_d = None # Indicators map for obstacle
+        self.unknown_map_d = None # Indicators map for unknown
         self.rng_states_d = None
 
         # Other task specific params that can be changed for this object
@@ -129,6 +131,12 @@ class TDM_Numba(object):
         self.res = None
         self.pmf_grid_initialized = False
 
+        self.risk_traction_map_d = None
+        self.obstacle_map = None
+        self.obstacle_map_d = None
+        self.unknown_map = None
+        self.unknown_map_d = None
+
         # For visualization
         self.cell_dimensions = None
         self.figsize = None
@@ -158,7 +166,9 @@ class TDM_Numba(object):
 
     def set_TDM_from_semantic_grid(self, sg, res, num_pmf_bins, bin_values, bin_values_bounds,
                                   xlimits, ylimits, id2name, name2terrain, terrain2pmf,
-                                  det_dynamics_cvar_alpha=None):
+                                  det_dynamics_cvar_alpha=None,
+                                  obstacle_map=None,
+                                  unknown_map=None):
         """
         Mainly used for simulation benchmark where semantics and their ground truth properties are known.
         Save semantic grid and initialize visualization parameters.
@@ -193,6 +203,18 @@ class TDM_Numba(object):
 
         # Initialize pmf grid and account for padding
         self.pmf_grid = np.zeros((self.num_pmf_bins, num_rows, num_cols), dtype=np.int8)
+
+        # Vars for holding obstacles and unknown masks
+        if (obstacle_map is not None) and (unknown_map is not None):
+            assert obstacle_map.shape==(num_rows, num_cols), "obstacle_map does not have the same XY dim as pmf grid."
+            assert unknown_map.shape==(num_rows, num_cols), "unknown_map does not have the same XY dim as pmf grid."
+
+            self.obstacle_map = np.asarray(obstacle_map).astype(np.int8).reshape(num_rows, num_cols)
+            self.unknown_map = np.asarray(unknown_map).astype(np.int8).reshape(num_rows, num_cols)
+        else:
+            self.obstacle_map = np.zeros((num_rows, num_cols), dtype=np.int8)
+            self.unknown_map = np.zeros((num_rows, num_cols), dtype=np.int8)
+        
         
         if self.use_det_dynamics:
             # Use dynamics computed based on cvar_alpha
@@ -236,33 +258,6 @@ class TDM_Numba(object):
 
         elif self.use_nom_dynamics_with_speed_map:
 
-
-            #------------ Part of this is wrong ----------------------
-            # # Set PMF to have 1 in the last bin
-            # self.pmf_grid[-1,:,:] = np.int8(100)
-            # # Generate the risk speed map (CVaR)
-            # risk_traction_map = np.zeros((1, num_rows, num_cols), dtype=np.int8)
-            # traction_range = self.bin_values_bounds[1] - self.bin_values_bounds[0]
-
-            # if det_dynamics_cvar_alpha==1.0:
-            #     # This is WRONG for risk traction map. Need to compute the expeted value
-            #     risk_traction_map[0, :, :] = np.int8(100)
-            # else:
-            #     for ri in range(num_rows):
-            #         for ci in range(num_cols):
-            #             terrain = self.id2terrain_fn(self.semantic_grid[ri, ci])
-            #             values, pmf = self.terrain2pmf[terrain]
-            #             cum_sum = 0.0
-            #             expected_traction = 0.0
-            #             for val, m in zip(values, pmf):
-            #                 cum_sum += m
-            #                 expected_traction += m*val
-            #                 if cum_sum >= det_dynamics_cvar_alpha:
-            #                     if cum_sum > 0:
-            #                         expected_traction /= cum_sum
-            #                     risk_traction_map[0, ri, ci] = np.int8(100*(expected_traction-self.bin_values_bounds[0])/traction_range)
-            #                     break
-
             # ----------------------------------
             self.pmf_grid[-1,:,:] = np.int8(100)
             num_rows, num_cols = self.semantic_grid.shape
@@ -304,8 +299,12 @@ class TDM_Numba(object):
                     100*np.asarray((cvars.reshape(num_rows, num_cols)-self.bin_values_bounds[0])/traction_range),
                     (1,num_rows,num_cols)
                 ).astype(np.int8)
-
-            self.risk_traction_map_d = cuda.to_device(risk_traction_map)
+            
+            # Padd the worst case risk
+            padded_risk_traction_map, _, _ = self.set_padding_risk_traction(risk_traction_map, self.max_speed_padding, self.dt, res, xlimits, ylimits)
+            # padded_risk_traction_map = self.set_padding_2d(risk_traction_map, self.max_speed_padding, self.dt, res, pad_val=0)
+            self.risk_traction_map_d = cuda.to_device(padded_risk_traction_map)
+            # self.risk_traction_map_d = cuda.to_device(risk_traction_map)
 
         elif self.use_tdm:
 
@@ -324,11 +323,17 @@ class TDM_Numba(object):
         else:
             assert False, "TDM cannot be set up"
         
-        padded_pmf_grid, self.padded_xlimits, self.padded_ylimits = self.set_padding(self.pmf_grid, self.max_speed_padding, self.dt, res,
-                                                            xlimits, ylimits)
+        padded_pmf_grid, self.padded_xlimits, self.padded_ylimits \
+            = self.set_padding(self.pmf_grid, self.max_speed_padding, self.dt, res, xlimits, ylimits)
         self.pmf_grid_d = cuda.to_device(padded_pmf_grid)
         self.bin_values_d = cuda.to_device(bin_values)
         self.bin_values_bounds_d = cuda.to_device(bin_values_bounds)
+
+        # Also pad the obstacle and unknown mask
+        padded_obstacle_map = self.set_padding_2d(self.obstacle_map, self.max_speed_padding, self.dt, res)
+        padded_unknown_map = self.set_padding_2d(self.unknown_map, self.max_speed_padding, self.dt, res)
+        self.obstacle_map_d = cuda.to_device(padded_obstacle_map)
+        self.unknown_map_d = cuda.to_device(padded_unknown_map)
         
         # Crop the original semantic map to fit in memory
         num_rows, num_cols = self.pmf_grid_d.shape[1:]
@@ -345,69 +350,64 @@ class TDM_Numba(object):
             return None
 
     
-    def set_TDM_from_costmap(self, costmap_dict):
+    # def set_TDM_from_costmap(self, costmap_dict, obstacle_map=None, unknown_map=None):
 
-        assert self.use_costmap, "set_TDM_from_costmap is invoked when self.use_costmap is not True"
+    #     assert self.use_costmap, "set_TDM_from_costmap is invoked when self.use_costmap is not True"
+    #     # print('in set_TDM_from_Costmap')
+    #     start_t = time.time()
+    #     costmap = costmap_dict["costmap"]
+
+    #     # Based on semantics, construct the grid 
+    #     res = costmap_dict["res"]
+    #     self.res = res
+    #     self.cell_dimensions = (res, res)
+    #     self.xlimits = costmap_dict["xlimits"]
+    #     self.ylimits = costmap_dict["ylimits"]
+
+    #     num_rows, num_cols = costmap_dict["costmap"].shape
+    #     self.num_pmf_bins = 2 # costmap_dict["num_pmf_bins"]
+    #     self.bin_values = np.array([0.0, 1.0], dtype=np.float32) # costmap_dict["bin_values"].astype(np.float32)
+    #     self.bin_values_bounds = np.array([min(self.bin_values), max(self.bin_values)], dtype=np.float32) # costmap_dict["bin_values_bounds"].astype(np.float32)
+
+    #     # TODO: check obstacle and unknown map
+
+    #     # Padd obstacle and unknown map
+    #     # Padd the risk traction map as well
+    #     # Padd 
+
+
+    #     # # Initialize pmf grid
+    #     # Account for padding
+    #     self.pmf_grid = np.zeros((self.num_pmf_bins, num_rows, num_cols), dtype=np.int8)
+    #     self.pmf_grid[-1] = np.int8(100) # Set PMF to have 1 in the last bin
+
+    #     print("Took {} to initialize pmf grid".format(time.time()- start_t))
+    #     start_t = time.time()
+
+    #     # Generate the risk speed map (CVaR)
+    #     # TODO: further speed-up is possible via GPU kernel
+    #     risk_traction_map = 100*np.ones((num_rows, num_cols), dtype=np.int8)
+    #     no_info_mask = (costmap==255)
+    #     lethal_mask = ((costmap > costmap_dict["costmap_lethal_threshold"]) & (~no_info_mask))
+    #     risk_traction_map[no_info_mask] = -1
+    #     risk_traction_map[lethal_mask] = -2
+    #     self.risk_traction_map_d = cuda.to_device(risk_traction_map.reshape((1, num_rows, num_cols)))
+    #     print("Took {} to handle costmap values iteratively".format(time.time()- start_t))
+
+    #     start_t = time.time()
+    #     padded_pmf_grid, self.padded_xlimits, self.padded_ylimits = self.set_padding(self.pmf_grid, self.max_speed_padding, self.dt, res,
+    #                                                         self.xlimits, self.ylimits)
+    #     self.pmf_grid_d = cuda.to_device(padded_pmf_grid)
+    #     self.bin_values_d = cuda.to_device(self.bin_values)
+    #     self.bin_values_bounds_d = cuda.to_device(self.bin_values_bounds)
         
-        print('in set_TDM_from_Costmap')
+    #     # How to ensure the padded map fits properly in the allocated device memory?
+    #     # Check dimension 
+    #     # Get max col and max rows to sample over (must be the min of allocated and provided pmf)
+    #     # Store this info in class variable 
 
-        start_t = time.time()
-        costmap = costmap_dict["costmap"]
-
-        # print("Received costmap array and configs: {}".format(costmap_dict))
-        # TODO: make sure samples can be taken based on the costmap
-        # TODO: if we are only using costmap, we use nominal dynamics and risk-adjusted time-cost
-        # Based on semantics, construct the grid 
-        res = costmap_dict["res"]
-        self.res = res
-        self.cell_dimensions = (res, res)
-        self.xlimits = costmap_dict["xlimits"]
-        self.ylimits = costmap_dict["ylimits"]
-
-        num_rows, num_cols = costmap_dict["costmap"].shape
-        self.num_pmf_bins = 2 # costmap_dict["num_pmf_bins"]
-        self.bin_values = np.array([0.0, 1.0], dtype=np.float32) # costmap_dict["bin_values"].astype(np.float32)
-        self.bin_values_bounds = np.array([min(self.bin_values), max(self.bin_values)], dtype=np.float32) # costmap_dict["bin_values_bounds"].astype(np.float32)
-
-        # Default to using nominal dynamics and risk-adjusted time cost
-        # assert (not self.use_det_dynamics) and (self.use_nom_dynamics_with_speed_map), "When using costmap, must have use_nom_dynamics_with_speed_map=True and use_det_dynamics=False"
-        
-
-        # # Initialize pmf grid
-        # Account for padding
-        self.pmf_grid = np.zeros((self.num_pmf_bins, num_rows, num_cols), dtype=np.int8)
-        self.pmf_grid[-1] = np.int8(100) # Set PMF to have 1 in the last bin
-
-        print("Took {} to initialize pmf grid".format(time.time()- start_t))
-        start_t = time.time()
-
-        # Generate the risk speed map (CVaR)
-        # TODO: further speed-up is possible via GPU kernel
-        risk_traction_map = 100*np.ones((num_rows, num_cols), dtype=np.int8)
-        no_info_mask = (costmap==255)
-        lethal_mask = ((costmap > costmap_dict["costmap_lethal_threshold"]) & (~no_info_mask))
-        risk_traction_map[no_info_mask] = -1
-        risk_traction_map[lethal_mask] = -2
-        self.risk_traction_map_d = cuda.to_device(risk_traction_map.reshape((1, num_rows, num_cols)))
-
-        print("Took {} to handle costmap values iteratively".format(time.time()- start_t))
-
-        start_t = time.time()
-
-        padded_pmf_grid, self.padded_xlimits, self.padded_ylimits = self.set_padding(self.pmf_grid, self.max_speed_padding, self.dt, res,
-                                                            self.xlimits, self.ylimits)
-        self.pmf_grid_d = cuda.to_device(padded_pmf_grid)
-        self.bin_values_d = cuda.to_device(self.bin_values)
-        self.bin_values_bounds_d = cuda.to_device(self.bin_values_bounds)
-        
-        # How to ensure the padded map fits properly in the allocated device memory?
-        # Check dimension 
-        # Get max col and max rows to sample over (must be the min of allocated and provided pmf)
-        # Store this info in class variable 
-
-        self.pmf_grid_initialized = True
-
-        print("Took {} to transfer procesed PMF grid to device".format(time.time()- start_t))
+    #     self.pmf_grid_initialized = True
+    #     print("Took {} to transfer procesed PMF grid to device".format(time.time()- start_t))
 
 
     def print_bin_values_bounds(self, obj_name):
@@ -416,7 +416,7 @@ class TDM_Numba(object):
         else:
             print("{}: bin values bounds are ".format(obj_name), self.bin_values_bounds_d.copy_to_host())
         
-    def set_TDM_from_PMF_grid(self, pmf_grid, tdm_dict):
+    def set_TDM_from_PMF_grid(self, pmf_grid, tdm_dict, obstacle_map=None, unknown_map=None):
         # Code for interfacing PMF values from cpp interface
         # Input pmf_grid has shape (num_bins, num_rows, num_cols), where all bins sum to 100 for (row, col)
         if not (tdm_dict["det_dynamics_cvar_alpha"]>0 and tdm_dict["det_dynamics_cvar_alpha"]<=1.0 ):
@@ -437,8 +437,17 @@ class TDM_Numba(object):
         self.bin_values_d = cuda.to_device(self.bin_values)
         self.bin_values_bounds_d = cuda.to_device(self.bin_values_bounds)
 
+        # Vars for holding obstacles and unknown masks
+        if (obstacle_map is not None) and (unknown_map is not None):
+            assert obstacle_map.shape==(num_rows, num_cols), "obstacle_map does not have the same XY dim as pmf grid."
+            assert unknown_map.shape==(num_rows, num_cols), "unknown_map does not have the same XY dim as pmf grid."
 
-        # TODO: Debug new implementation
+            self.obstacle_map = np.asarray(obstacle_map).astype(np.int8).reshape(num_rows, num_cols)
+            self.unknown_map = np.asarray(unknown_map).astype(np.int8).reshape(num_rows, num_cols)
+        else:
+            self.obstacle_map = np.zeros((num_rows, num_cols), dtype=np.int8)
+            self.unknown_map = np.zeros((num_rows, num_cols), dtype=np.int8)
+        
         if self.use_det_dynamics:
             if (np.sum(pmf_grid, axis=0)!=100).any():
                 print("WARNING: the provided PMF has columns that don't sum up to 100: {}".fromat(
@@ -485,7 +494,6 @@ class TDM_Numba(object):
                 print("WARNING: pmf_grid not properly set in set_TDM_from_PMF_grid. Values don't' sum to 100")
 
 
-        # TODO: debug in sim
         elif self.use_nom_dynamics_with_speed_map:
             if (np.sum(pmf_grid, axis=0)!=100).any():
                 print("WARNING: the provided PMF has columns that don't sum up to 100: {}".fromat(
@@ -523,7 +531,10 @@ class TDM_Numba(object):
                     100*np.asarray((cvars.reshape(num_rows, num_cols)-self.bin_values_bounds[0])/traction_range),
                     (1,num_rows,num_cols)).astype(np.int8)
 
-            self.risk_traction_map_d = cuda.to_device(risk_traction_map)
+            # Padd the worst case risk
+            padded_risk_traction_map, _, _ = self.set_padding_risk_traction(risk_traction_map, self.max_speed_padding, self.dt, res, self.xlimits, self.ylimits)
+            # padded_risk_traction_map = self.set_padding_2d(risk_traction_map, self.max_speed_padding, self.dt, res, pad_val=0)
+            self.risk_traction_map_d = cuda.to_device(padded_risk_traction_map)
 
         else:
             # For proposed method, use the existing PMF
@@ -535,18 +546,137 @@ class TDM_Numba(object):
         padded_pmf_grid, self.padded_xlimits, self.padded_ylimits = self.set_padding(self.pmf_grid, self.max_speed_padding, self.dt, res,
                                                             self.xlimits, self.ylimits)
         self.pmf_grid_d = cuda.to_device(padded_pmf_grid)
+        # padded_pmf_grid, self.padded_xlimits, self.padded_ylimits, padded_obstacle_map, padded_unknown_map \
+        #     = self.set_padding(self.pmf_grid, self.obstacle_map, self.unknown_map, self.max_speed_padding, self.dt, res, self.xlimits, self.ylimits)
+        # self.pmf_grid_d = cuda.to_device(padded_pmf_grid)
+
+        # Also pad the obstacle and unknown mask
+        padded_obstacle_map = self.set_padding_2d(self.obstacle_map, self.max_speed_padding, self.dt, res)
+        padded_unknown_map = self.set_padding_2d(self.unknown_map, self.max_speed_padding, self.dt, res)
+        self.obstacle_map_d = cuda.to_device(padded_obstacle_map)
+        self.unknown_map_d = cuda.to_device(padded_unknown_map)
+        self.obstacle_map_d = cuda.to_device(padded_obstacle_map)
+        self.unknown_map_d = cuda.to_device(padded_unknown_map)
+
         self.pmf_grid_initialized = True
 
         
 
-    def set_padding(self, pmf_grid, max_speed_padding, dt, res, xlimits, ylimits):
+    # def set_padding(self, pmf_grid, max_speed_padding, dt, res, xlimits, ylimits):
+    #     """
+    #     Padd the nominal pmf grid with 0_traction components (assumed to be the first bin values)
+    #     This function also checks the size of allocated GPU memory and crop the provided PMF accordingly 
+    #     (from bottom left origin) while leaving enough memory for padding.
+    #     """
+    #     _, rows, cols = pmf_grid.shape
+    #     self.pad_cells = pad_cells = int(np.ceil(max_speed_padding*dt/res))
+
+    #     # Based on allocated GPU mem
+    #     max_rows = self.max_map_dim[0]-2*pad_cells
+    #     max_cols = self.max_map_dim[1]-2*pad_cells
+    #     if max_rows < 1 or max_cols < 1:
+    #         print("While padding the TDM, the max_allowed rows {} or cols {} are below 1.\nAllocated GPU array size: {}".format(
+    #             max_rows, max_cols, 
+    #             [1 if self.det_dyn else self.num_grid_samples, self.max_map_dim[0], self.max_map_dim[1]]))
+    #         assert False
+        
+    #     valid_rows = min(max_rows, rows)
+    #     valid_cols = min(max_cols, cols)
+    #     if valid_rows<rows or valid_cols<cols:
+    #         print("WARNING: While padding the TDM, original PMF is cropped from ({}, {}) to ({}, {})to fit in allocated GPU memory.".format(
+    #             rows, cols, valid_rows , valid_cols ))
+
+    #     padded_xlimits = np.array([xlimits[0]-pad_cells*res, xlimits[0]+(valid_cols+pad_cells)*res])
+    #     padded_ylimits = np.array([ylimits[0]-pad_cells*res, ylimits[0]+(valid_rows+pad_cells)*res])
+        
+    #     # Extract the valid submap from the provided pmf_grid
+    #     padded_pmf_grid = np.zeros((self.num_pmf_bins, valid_rows+2*pad_cells, valid_cols+2*pad_cells), dtype=np.int8)
+    #     padded_pmf_grid[0] = np.int8(100) # Fill the probability mass associated with 0 traction
+    #     padded_pmf_grid[:, pad_cells:(pad_cells+valid_rows), pad_cells:(pad_cells+valid_cols)] = pmf_grid[:,:valid_rows, :valid_cols]
+        
+    #     return padded_pmf_grid, padded_xlimits, padded_ylimits
+
+
+    def set_padding_risk_traction(self, grid, max_speed_padding, dt, res, xlimits, ylimits):
+        valid_rows, valid_cols, pad_cells = self.get_padding_info(grid.shape, max_speed_padding, dt, res)
+        self.pad_cells = pad_cells
+
+        padded_xlimits = np.array([xlimits[0]-pad_cells*res, xlimits[0]+(valid_cols+pad_cells)*res])
+        padded_ylimits = np.array([ylimits[0]-pad_cells*res, ylimits[0]+(valid_rows+pad_cells)*res])
+        
+        # Extract the valid submap from the provided pmf_grid
+        padded_grid = np.zeros((1, valid_rows+2*pad_cells, valid_cols+2*pad_cells), dtype=np.int8)
+        padded_grid[:, pad_cells:(pad_cells+valid_rows), pad_cells:(pad_cells+valid_cols)] = grid[:,:valid_rows, :valid_cols]
+        
+        return padded_grid, padded_xlimits, padded_ylimits #, padded_obstacle_map, padded_unknown_map
+
+
+    def set_padding(self, pmf_grid,  max_speed_padding, dt, res, xlimits, ylimits):
         """
         Padd the nominal pmf grid with 0_traction components (assumed to be the first bin values)
         This function also checks the size of allocated GPU memory and crop the provided PMF accordingly 
         (from bottom left origin) while leaving enough memory for padding.
         """
-        _, rows, cols = pmf_grid.shape
-        self.pad_cells = pad_cells = int(np.ceil(max_speed_padding*dt/res))
+        # _, rows, cols = pmf_grid.shape
+        # self.pad_cells = pad_cells = int(np.ceil(max_speed_padding*dt/res))
+
+        # # Based on allocated GPU mem
+        # max_rows = self.max_map_dim[0]-2*pad_cells
+        # max_cols = self.max_map_dim[1]-2*pad_cells
+        # if max_rows < 1 or max_cols < 1:
+        #     print("While padding the TDM, the max_allowed rows {} or cols {} are below 1.\nAllocated GPU array size: {}".format(
+        #         max_rows, max_cols, 
+        #         [1 if self.det_dyn else self.num_grid_samples, self.max_map_dim[0], self.max_map_dim[1]]))
+        #     assert False
+        
+        # valid_rows = min(max_rows, rows)
+        # valid_cols = min(max_cols, cols)
+        # if valid_rows<rows or valid_cols<cols:
+        #     print("WARNING: While padding the TDM, original PMF is cropped from ({}, {}) to ({}, {})to fit in allocated GPU memory.".format(
+        #         rows, cols, valid_rows , valid_cols ))
+        valid_rows, valid_cols, pad_cells = self.get_padding_info(pmf_grid.shape, max_speed_padding, dt, res)
+        self.pad_cells = pad_cells
+
+        padded_xlimits = np.array([xlimits[0]-pad_cells*res, xlimits[0]+(valid_cols+pad_cells)*res])
+        padded_ylimits = np.array([ylimits[0]-pad_cells*res, ylimits[0]+(valid_rows+pad_cells)*res])
+        
+        # Extract the valid submap from the provided pmf_grid
+        padded_pmf_grid = np.zeros((self.num_pmf_bins, valid_rows+2*pad_cells, valid_cols+2*pad_cells), dtype=np.int8)
+        padded_pmf_grid[0] = np.int8(100) # Fill the probability mass associated with 0 traction
+        padded_pmf_grid[:, pad_cells:(pad_cells+valid_rows), pad_cells:(pad_cells+valid_cols)] = pmf_grid[:,:valid_rows, :valid_cols]
+        
+        # # Extract the valid submap the traction and unknown maps 
+        # padded_obstacle_map = np.zeros((valid_rows+2*pad_cells, valid_cols+2*pad_cells), dtype=np.int8)
+        # padded_obstacle_map[pad_cells:(pad_cells+valid_rows), pad_cells:(pad_cells+valid_cols)] = obstacle_map[:valid_rows, :valid_cols]
+        # padded_unknown_map = np.zeros((valid_rows+2*pad_cells, valid_cols+2*pad_cells), dtype=np.int8)
+        # padded_unknown_map[pad_cells:(pad_cells+valid_rows), pad_cells:(pad_cells+valid_cols)] = unknown_map[:valid_rows, :valid_cols]
+
+        return padded_pmf_grid, padded_xlimits, padded_ylimits #, padded_obstacle_map, padded_unknown_map
+
+
+    def set_padding_2d(self, map, max_speed_padding, dt, res, pad_val=0):
+        """
+        Padd the nominal pmf grid with 0_traction components (assumed to be the first bin values)
+        This function also checks the size of allocated GPU memory and crop the provided PMF accordingly 
+        (from bottom left origin) while leaving enough memory for padding.
+        """
+        valid_rows, valid_cols, pad_cells = self.get_padding_info(map.shape, max_speed_padding, dt, res)
+        self.pad_cells = pad_cells
+
+        # Extract the valid submap the traction and unknown maps 
+        padded_map = pad_val*np.ones((valid_rows+2*pad_cells, valid_cols+2*pad_cells), dtype=np.int8)
+        padded_map[pad_cells:(pad_cells+valid_rows), pad_cells:(pad_cells+valid_cols)] = map[:valid_rows, :valid_cols]
+
+        return padded_map
+
+
+
+    def get_padding_info(self, grid_shape, max_speed_padding, dt, res):
+        if len(grid_shape)==3:
+            _, rows, cols = grid_shape
+        elif len(grid_shape)==2:
+            rows, cols = grid_shape
+        pad_cells = int(np.ceil(max_speed_padding*dt/res))
 
         # Based on allocated GPU mem
         max_rows = self.max_map_dim[0]-2*pad_cells
@@ -562,16 +692,7 @@ class TDM_Numba(object):
         if valid_rows<rows or valid_cols<cols:
             print("WARNING: While padding the TDM, original PMF is cropped from ({}, {}) to ({}, {})to fit in allocated GPU memory.".format(
                 rows, cols, valid_rows , valid_cols ))
-
-        padded_xlimits = np.array([xlimits[0]-pad_cells*res, xlimits[0]+(valid_cols+pad_cells)*res])
-        padded_ylimits = np.array([ylimits[0]-pad_cells*res, ylimits[0]+(valid_rows+pad_cells)*res])
-        
-        # Extract the valid submap from the provided pmf_grid
-        padded_pmf_grid = np.zeros((self.num_pmf_bins, valid_rows+2*pad_cells, valid_cols+2*pad_cells), dtype=np.int8)
-        padded_pmf_grid[0] = np.int8(100) # Fill the probability mass associated with 0 traction
-        padded_pmf_grid[:, pad_cells:(pad_cells+valid_rows), pad_cells:(pad_cells+valid_cols)] = pmf_grid[:,:valid_rows, :valid_cols]
-        
-        return padded_pmf_grid, padded_xlimits, padded_ylimits
+        return valid_rows, valid_cols, pad_cells
 
 
     

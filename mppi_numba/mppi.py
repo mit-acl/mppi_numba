@@ -20,9 +20,12 @@ def stage_cost(dist2, dt, dist_weight):
 # Terminal costs
 @cuda.jit('float32(float32, float32, boolean)', device=True, inline=True)
 def term_cost(dist2, v_post_rollout, goal_reached):
-  return (1-np.float32(goal_reached))*dist2/(v_post_rollout+1e-6)
+  return (1-np.float32(goal_reached))*math.sqrt(dist2)/(v_post_rollout+1e-6)
 
 
+# To handle unknown and obstacles
+UNKNOWN_TIME_COST_RATIO = 1e3# 10.0
+OBS_TIME_COST_RATIO = 1e10
 
 class MPPI_Numba(object):
 
@@ -187,6 +190,10 @@ class MPPI_Numba(object):
            u_std_d, cvar_alpha_d, x0_d, dt_d = self.move_mppi_task_vars_to_device()
   
 
+    lin_sample_grid_batch_d = self.lin_tdm.sample_grids() # get ref to device samples
+    ang_sample_grid_batch_d = self.ang_tdm.sample_grids() # get ref to device samples
+
+
     # Optimization loop
     for k in range(self.params['num_opt']):
 
@@ -196,8 +203,11 @@ class MPPI_Numba(object):
       
       # Rollout and compute mean or cvar
       self.rollout_det_dyn_w_speed_map_numba[self.num_control_rollouts, 1](
+        lin_sample_grid_batch_d,
+        ang_sample_grid_batch_d,
         self.lin_tdm.risk_traction_map_d,
         self.lin_tdm.bin_values_bounds_d,
+        self.ang_tdm.bin_values_bounds_d,
         res_d,
         xlimits_d,
         ylimits_d,
@@ -590,10 +600,15 @@ class MPPI_Numba(object):
     lin_ratio = 0.01*(lin_bin_values_bounds_d[1]-lin_bin_values_bounds_d[0])
     ang_ratio = 0.01*(ang_bin_values_bounds_d[1]-ang_bin_values_bounds_d[0])
 
+    # printed = False
     for t in range(timesteps):
       # Look up the traction parameters from map
       xi = numba.int32((x_curr[0]-xlimits_d[0])//res_d)
       yi = numba.int32((x_curr[1]-ylimits_d[0])//res_d)
+
+      # if not printed and (xi<0 or yi<0):
+      #   print("Out of bound")
+      #   printed = True
 
       vtraction = lin_bin_values_bounds_d[0]+lin_ratio*lin_sample_grid_batch_d[tid, yi, xi]
       wtraction = ang_bin_values_bounds_d[0]+ang_ratio*ang_sample_grid_batch_d[tid, yi, xi]
@@ -627,12 +642,11 @@ class MPPI_Numba(object):
   @staticmethod
   @cuda.jit(fastmath=True)
   def rollout_det_dyn_w_speed_map_numba(
-          #lin_sample_grid_batch_d,
-          #ang_sample_grid_batch_d,
+          lin_sample_grid_batch_d,
+          ang_sample_grid_batch_d,
           lin_risk_traction_map_d,
-          #ang_risk_traction_map_d,
           lin_bin_values_bounds_d,
-          # ang_bin_values_bounds_d,
+          ang_bin_values_bounds_d,
           res_d, 
           xlimits_d,
           ylimits_d,
@@ -653,12 +667,11 @@ class MPPI_Numba(object):
     Every thread in each block considers different traction grids but the same control sequence.
     Each block produces a single result (reduce a shared list to produce CVaR or mean. Is there a more efficient way to do this?)
     """
-    UNKNOWN_COST_RATIO = 10.0# 10.0
-    OBS_COST_RATIO = 10000.0
+
 
     # Get block id and thread id
     bid = cuda.blockIdx.x   # index of block
-    # tid = cuda.threadIdx.x  # index of thread within a block
+    tid = cuda.threadIdx.x  # index of thread within a block
     costs_d[bid] = 0.0
 
     # Explicit unicycle update and map lookup
@@ -676,12 +689,22 @@ class MPPI_Numba(object):
     v_nom =v_noisy = w_nom = w_noisy = 0.0
 
     lin_ratio = 0.01*(lin_bin_values_bounds_d[1]-lin_bin_values_bounds_d[0])
-    # ang_ratio = 0.01*(ang_bin_values_bounds_d[1]-ang_bin_values_bounds_d[0])
+    ang_ratio = 0.01*(ang_bin_values_bounds_d[1]-ang_bin_values_bounds_d[0])
 
+    # printed=False
     for t in range(timesteps):
       # Look up the traction parameters from map
       xi = numba.int32((x_curr[0]-xlimits_d[0])//res_d)
       yi = numba.int32((x_curr[1]-ylimits_d[0])//res_d)
+
+      # Still need to look up dynamics (nominal) to make sure states don't out of allocated bounds
+      vtraction = lin_bin_values_bounds_d[0]+lin_ratio*lin_sample_grid_batch_d[tid, yi, xi]
+      wtraction = ang_bin_values_bounds_d[0]+ang_ratio*ang_sample_grid_batch_d[tid, yi, xi]
+
+
+      # if not printed and (xi<0 or yi<0):
+      #   print("Out of bound")
+      #   printed = True
 
       # Nominal noisy control
       v_nom = u_cur_d[t, 0] + noise_samples_d[bid, t, 0]
@@ -690,9 +713,9 @@ class MPPI_Numba(object):
       w_noisy = max(wrange_d[0], min(wrange_d[1], w_nom))
       
       # Forward simulate
-      x_curr[0] += dt_d*v_noisy*math.cos(x_curr[2])
-      x_curr[1] += dt_d*v_noisy*math.sin(x_curr[2])
-      x_curr[2] += dt_d*w_noisy
+      x_curr[0] += dt_d*vtraction*v_noisy*math.cos(x_curr[2])
+      x_curr[1] += dt_d*vtraction*v_noisy*math.sin(x_curr[2])
+      x_curr[2] += dt_d*wtraction*w_noisy
 
       # Accumulate (risk-speed adjusted) cost starting at the initial state
 
@@ -701,14 +724,11 @@ class MPPI_Numba(object):
       
       if lin_risk_traction_map_d[0, yi, xi]>=0:
         vtraction = lin_bin_values_bounds_d[0]+lin_ratio*lin_risk_traction_map_d[0, yi, xi]
-        # costs_d[bid]+=(dt_d/(vtraction+1e-6)) # avoid div by 0
         costs_d[bid]+= stage_cost(dist_to_goal2, dt_d/(vtraction+1e-6), 1.0)
       elif lin_risk_traction_map_d[0, yi, xi] == -1:
-        # costs_d[bid] += dt_d*UNKNOWN_COST_RATIO
-        costs_d[bid]+= stage_cost(dist_to_goal2, dt_d*UNKNOWN_COST_RATIO, 1.0)
+        costs_d[bid]+= stage_cost(dist_to_goal2, dt_d*UNKNOWN_TIME_COST_RATIO, 1.0)
       elif lin_risk_traction_map_d[0, yi, xi] == -2:
-        # costs_d[bid] += dt_d*OBS_COST_RATIO
-        costs_d[bid]+= stage_cost(dist_to_goal2, dt_d*OBS_COST_RATIO, 1.0)
+        costs_d[bid]+= stage_cost(dist_to_goal2, dt_d*OBS_TIME_COST_RATIO, 1.0)
       
       costs_d[bid] += lambda_weight_d*(
               (u_cur_d[t,0]/(u_std_d[0]**2))*noise_samples_d[bid, t,0] + (u_cur_d[t,1]/(u_std_d[1]**2))*noise_samples_d[bid, t, 1])
