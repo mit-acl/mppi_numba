@@ -19,7 +19,7 @@ class Config:
                max_speed_padding=5.0, # Maximum assumed speed for padding the perimeter of grid
                tdm_sample_thread_dim=(16, 16), # Block shape used for sampling each grid map. Max (32, 32)
                num_vis_state_rollouts=20, # Number of visualization rollouts
-               max_map_xy_dim=(250, 250), # Largest dim for incoming maps with padding (in cells). Anything bigger will be cropped.
+               max_map_dim=(250, 250), # Largest dim for incoming maps with padding (in cells). Anything bigger will be cropped.
                seed=1,
                use_tdm=False,
                use_det_dynamics=False,
@@ -89,5 +89,5 @@ class Config:
                                       self.num_grid_samples])
     self.num_vis_state_rollouts = max([1, self.num_vis_state_rollouts])
 
-    self.max_map_xy_dim = max_map_xy_dim
+    self.max_map_dim = max_map_dim
     

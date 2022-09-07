@@ -78,7 +78,7 @@ class TDM_Numba(object):
         self.max_speed_padding = cfg.max_speed_padding
         self.tdm_sample_thread_dim = cfg.tdm_sample_thread_dim
         self.num_vis_state_rollouts = cfg.num_vis_state_rollouts
-        self.max_map_xy_dim = cfg.max_map_xy_dim
+        self.max_map_dim = cfg.max_map_dim
         self.seed = cfg.seed
         self.use_tdm = cfg.use_tdm
         self.use_det_dynamics = cfg.use_det_dynamics
@@ -143,7 +143,7 @@ class TDM_Numba(object):
             t0 = time.time()
             
             ## Allocate more than needed space to account for varying map size (crop if larger than expected)
-            rows, cols = self.max_map_xy_dim
+            rows, cols = self.max_map_dim
         
             if not self.det_dyn:
                 self.rng_states_d = create_xoroshiro128p_states(self.total_threads, seed=self.seed)
@@ -549,12 +549,12 @@ class TDM_Numba(object):
         self.pad_cells = pad_cells = int(np.ceil(max_speed_padding*dt/res))
 
         # Based on allocated GPU mem
-        max_rows = self.max_map_xy_dim[0]-2*pad_cells
-        max_cols = self.max_map_xy_dim[1]-2*pad_cells
+        max_rows = self.max_map_dim[0]-2*pad_cells
+        max_cols = self.max_map_dim[1]-2*pad_cells
         if max_rows < 1 or max_cols < 1:
             print("While padding the TDM, the max_allowed rows {} or cols {} are below 1.\nAllocated GPU array size: {}".format(
                 max_rows, max_cols, 
-                [1 if self.det_dyn else self.num_grid_samples, self.max_map_xy_dim[0], self.max_map_xy_dim[1]]))
+                [1 if self.det_dyn else self.num_grid_samples, self.max_map_dim[0], self.max_map_dim[1]]))
             assert False
         
         valid_rows = min(max_rows, rows)

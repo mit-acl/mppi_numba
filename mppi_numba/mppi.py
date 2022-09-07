@@ -38,7 +38,7 @@ class MPPI_Numba(object):
     self.max_speed_padding = cfg.max_speed_padding
     self.tdm_sample_thread_dim = cfg.tdm_sample_thread_dim
     self.num_vis_state_rollouts = cfg.num_vis_state_rollouts
-    self.max_map_xy_dim = cfg.max_map_xy_dim
+    self.max_map_dim = cfg.max_map_dim
     self.seed = cfg.seed
     self.use_tdm = cfg.use_tdm
     self.use_det_dynamics = cfg.use_det_dynamics
@@ -489,6 +489,8 @@ class MPPI_Numba(object):
 
       dist_to_goal2 = (xgoal_d[0]-x_curr[0])**2 + (xgoal_d[1]-x_curr[1])**2
       thread_cost_shared[tid]+=stage_cost(dist_to_goal2, dt_d, 1.0)
+      thread_cost_shared[tid] += lambda_weight_d*(
+              (u_cur_d[t,0]/(u_std_d[0]**2))*noise_samples_d[bid,t,0] + (u_cur_d[t,1]/(u_std_d[1]**2))*noise_samples_d[bid,t, 1])
       
       if dist_to_goal2<= goal_tolerance_d2:
         goal_reached = True
@@ -496,11 +498,6 @@ class MPPI_Numba(object):
     
     # Accumulate terminal cost 
     thread_cost_shared[tid] += term_cost(dist_to_goal2, v_post_rollout_d, goal_reached)
-      
-    # Accumulate the missing stage cost
-    for t in range(timesteps):
-      thread_cost_shared[tid] += lambda_weight_d*(
-              (u_cur_d[t,0]/(u_std_d[0]**2))*noise_samples_d[bid,t,0] + (u_cur_d[t,1]/(u_std_d[1]**2))*noise_samples_d[bid,t, 1])
 
     # Reudce thread_cost_shared to a single value (mean or CVaR)
     cuda.syncthreads()  # make sure all threads have produced costs
@@ -615,7 +612,9 @@ class MPPI_Numba(object):
 
       dist_to_goal2 = (xgoal_d[0]-x_curr[0])**2 + (xgoal_d[1]-x_curr[1])**2
       costs_d[bid]+=stage_cost(dist_to_goal2, dt_d, 1.0)
-      
+      costs_d[bid] += lambda_weight_d*(
+              (u_cur_d[t,0]/(u_std_d[0]**2))*noise_samples_d[bid, t,0] + (u_cur_d[t,1]/(u_std_d[1]**2))*noise_samples_d[bid, t, 1])
+
       if dist_to_goal2<= goal_tolerance_d2:
         goal_reached = True
         break
@@ -623,10 +622,6 @@ class MPPI_Numba(object):
     # Accumulate terminal cost 
     costs_d[bid] += term_cost(dist_to_goal2, v_post_rollout_d, goal_reached)
 
-    # Accumulate the missing stage cost
-    for t in range(timesteps):
-      costs_d[bid] += lambda_weight_d*(
-              (u_cur_d[t,0]/(u_std_d[0]**2))*noise_samples_d[bid, t,0] + (u_cur_d[t,1]/(u_std_d[1]**2))*noise_samples_d[bid, t, 1])
 
 
   @staticmethod
@@ -715,18 +710,16 @@ class MPPI_Numba(object):
         # costs_d[bid] += dt_d*OBS_COST_RATIO
         costs_d[bid]+= stage_cost(dist_to_goal2, dt_d*OBS_COST_RATIO, 1.0)
       
+      costs_d[bid] += lambda_weight_d*(
+              (u_cur_d[t,0]/(u_std_d[0]**2))*noise_samples_d[bid, t,0] + (u_cur_d[t,1]/(u_std_d[1]**2))*noise_samples_d[bid, t, 1])
+
+
       if dist_to_goal2<= goal_tolerance_d2:
         goal_reached = True
         break
     
     # Accumulate terminal cost 
     costs_d[bid] += term_cost(dist_to_goal2, v_post_rollout_d, goal_reached)
-
-
-    # Accumulate the missing stage cost
-    for t in range(timesteps):
-      costs_d[bid] += lambda_weight_d*(
-              (u_cur_d[t,0]/(u_std_d[0]**2))*noise_samples_d[bid, t,0] + (u_cur_d[t,1]/(u_std_d[1]**2))*noise_samples_d[bid, t, 1])
 
 
   @staticmethod
