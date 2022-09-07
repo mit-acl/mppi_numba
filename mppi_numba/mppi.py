@@ -55,6 +55,7 @@ class MPPI_Numba(object):
     # Initialize reuseable device variables
     self.noise_samples_d = None
     self.u_cur_d = None
+    self.u_prev_d = None
     self.costs_d = None
     self.weights_d = None
     self.rng_states_d = None
@@ -75,6 +76,8 @@ class MPPI_Numba(object):
     self.lin_tdm = None
     self.ang_tdm = None
     self.tdm_set = False
+
+    self.u_prev_d = None
     
     # Initialize all fixed-size device variables ahead of time. (Do not change in the lifetime of MPPI object)
     self.init_device_vars_before_solving()
@@ -86,6 +89,7 @@ class MPPI_Numba(object):
       
       self.noise_samples_d = cuda.device_array((self.num_control_rollouts, self.num_steps, 2), dtype=np.float32) # to be sampled collaboratively via GPU
       self.u_cur_d = cuda.to_device(self.u_seq0) 
+      self.u_prev_d = cuda.to_device(self.u_seq0) 
       self.costs_d = cuda.device_array((self.num_control_rollouts), dtype=np.float32)
       self.weights_d = cuda.device_array((self.num_control_rollouts), dtype=np.float32)
       self.rng_states_d = create_xoroshiro128p_states(self.num_control_rollouts*self.num_steps, seed=self.seed)
@@ -93,7 +97,8 @@ class MPPI_Numba(object):
       if not self.det_dyn:  
         self.state_rollout_batch_d = cuda.device_array((self.num_vis_state_rollouts, self.num_steps+1, 3), dtype=np.float32)
       else:
-        self.state_rollout_batch_d = cuda.device_array((1, self.num_steps+1, 3), dtype=np.float32)
+        # self.state_rollout_batch_d = cuda.device_array((1, self.num_steps+1, 3), dtype=np.float32)
+        self.state_rollout_batch_d = cuda.device_array((self.num_vis_state_rollouts, self.num_steps+1, 3), dtype=np.float32)
       
       self.device_var_initialized = True
       print("MPPI planner has initialized GPU memory after {} s".format(time.time()-t0))
@@ -238,6 +243,7 @@ class MPPI_Numba(object):
         # results
         self.costs_d
       )
+      self.u_prev_d = self.u_cur_d
 
       # Compute cost and update the optimal control on device
       self.update_useq_numba[1, 32](
@@ -295,7 +301,7 @@ class MPPI_Numba(object):
         # results
         self.costs_d
       )
-
+      self.u_prev_d = self.u_cur_d
       # Compute cost and update the optimal control on device
       self.update_useq_numba[1, 32](
         lambda_weight_d, 
@@ -396,14 +402,20 @@ class MPPI_Numba(object):
     res_d = np.float32(self.lin_tdm.res) # no need to move int
     xlimits_d = cuda.to_device(self.lin_tdm.padded_xlimits.astype(np.float32))
     ylimits_d = cuda.to_device(self.lin_tdm.padded_ylimits.astype(np.float32))
+    vrange_d = cuda.to_device(self.params['vrange'].astype(np.float32))
+    wrange_d = cuda.to_device(self.params['wrange'].astype(np.float32))
     x0_d = cuda.to_device(self.params['x0'].astype(np.float32))
     dt_d = np.float32(self.params['dt'])
 
     # Sample environment realizations for estimating cvar
-    lin_sample_grid_batch_d = self.lin_tdm.sample_grids() # get ref to device samples
-    ang_sample_grid_batch_d = self.ang_tdm.sample_grids() # get ref to device samples
+    # lin_sample_grid_batch_d = self.lin_tdm.sample_grids() # get ref to device samples
+    # ang_sample_grid_batch_d = self.ang_tdm.sample_grids() # get ref to device samples
+
+    lin_sample_grid_batch_d = self.lin_tdm.sample_grid_batch_d
+    ang_sample_grid_batch_d = self.ang_tdm.sample_grid_batch_d
+
     if self.det_dyn:
-      self.get_state_rollout_numba[1, 1](
+      self.get_state_rollout_across_control_noise[self.num_vis_state_rollouts, 1](
             self.state_rollout_batch_d, # where to store results
             lin_sample_grid_batch_d,
             ang_sample_grid_batch_d,
@@ -414,10 +426,15 @@ class MPPI_Numba(object):
             ylimits_d, 
             x0_d, 
             dt_d,
-            self.u_cur_d
+            self.noise_samples_d,
+            vrange_d,
+            wrange_d,
+            self.u_prev_d,
+            self.u_cur_d,
             )
     else:
-      self.get_state_rollout_numba[1, self.num_vis_state_rollouts](
+      # Get the state rollouts from the optimal control sequence via different sample environments
+      self.get_state_rollout_across_envs_numba[1, self.num_vis_state_rollouts](
             self.state_rollout_batch_d, # where to store results
             lin_sample_grid_batch_d,
             ang_sample_grid_batch_d,
@@ -693,9 +710,9 @@ class MPPI_Numba(object):
           wrange_d, 
           xgoal_d, 
           v_post_rollout_d, 
-          goal_tolerance_d, 
           obs_cost_d, 
           unknown_cost_d,
+          goal_tolerance_d, 
           lambda_weight_d, 
           u_std_d, 
           # cvar_alpha_d, # not used
@@ -758,20 +775,9 @@ class MPPI_Numba(object):
       x_curr[1] += dt_d*vtraction*v_noisy*math.sin(x_curr[2])
       x_curr[2] += dt_d*wtraction*w_noisy
 
-      # Accumulate (risk-speed adjusted) cost starting at the initial state
 
       # If else statements will be expensive
       dist_to_goal2 = (xgoal_d[0]-x_curr[0])**2 + (xgoal_d[1]-x_curr[1])**2
-      
-
-      # # TODO: remove if/else here, use obstacle and unknown map to directly impose costs.
-      # if lin_risk_traction_map_d[0, yi, xi]>=0:
-      #   vtraction = lin_bin_values_bounds_d[0]+lin_ratio*lin_risk_traction_map_d[0, yi, xi]
-      #   costs_d[bid]+= stage_cost(dist_to_goal2, dt_d/(vtraction+1e-6), 1.0)
-      # elif lin_risk_traction_map_d[0, yi, xi] == -1:
-      #   costs_d[bid]+= stage_cost(dist_to_goal2, dt_d*UNKNOWN_TIME_COST_RATIO, 1.0)
-      # elif lin_risk_traction_map_d[0, yi, xi] == -2:
-      #   costs_d[bid]+= stage_cost(dist_to_goal2, dt_d*OBS_TIME_COST_RATIO, 1.0)
       
       effective_speed = lin_bin_values_bounds_d[0]+lin_ratio*lin_risk_traction_map_d[0, yi, xi]
       costs_d[bid]+= stage_cost(dist_to_goal2, dt_d/(effective_speed+1e-6), 1.0)
@@ -867,11 +873,116 @@ class MPPI_Numba(object):
       u_cur_d[ti, 1] = max(wrange_d[0], min(wrange_d[1], u_cur_d[ti, 1]))
 
 
+  @staticmethod
+  @cuda.jit(fastmath=True)
+  def get_state_rollout_across_control_noise(
+          state_rollout_batch_d, # where to store results
+          lin_sample_grid_batch_d,
+          ang_sample_grid_batch_d,
+          lin_bin_values_bounds_d,
+          ang_bin_values_bounds_d,
+          res_d, 
+          xlimits_d, 
+          ylimits_d, 
+          x0_d, 
+          dt_d,
+          noise_samples_d,
+          vrange_d,
+          wrange_d,
+          u_prev_d,
+          u_cur_d):
+    """
+    Do a fixed number of rollouts for visualization across blocks.
+    Assume kernel is launched as get_state_rollout_across_control_noise[num_blocks, 1]
+    """
+    
+    # Use block id
+    tid = cuda.threadIdx.x
+    bid = cuda.blockIdx.x
+    timesteps = len(u_cur_d)
+
+
+    if bid==0:
+      # Visualize the current best 
+        
+
+      # Explicit unicycle update and map lookup
+      # From here on we assume grid is properly padded so map lookup remains valid
+      x_curr = cuda.local.array(3, numba.float32)
+      for i in range(3): 
+        x_curr[i] = x0_d[i]
+        state_rollout_batch_d[bid,0,i] = x0_d[i]
+
+      lin_ratio = 0.01*(lin_bin_values_bounds_d[1]-lin_bin_values_bounds_d[0])
+      ang_ratio = 0.01*(ang_bin_values_bounds_d[1]-ang_bin_values_bounds_d[0])
+      
+      for t in range(timesteps):
+        # Look up the traction parameters from map
+        xi = numba.int32((x_curr[0]-xlimits_d[0])//res_d)
+        yi = numba.int32((x_curr[1]-ylimits_d[0])//res_d)
+
+        vtraction = lin_bin_values_bounds_d[0] + lin_ratio*lin_sample_grid_batch_d[tid, yi, xi]
+        wtraction = ang_bin_values_bounds_d[0] + ang_ratio*ang_sample_grid_batch_d[tid, yi, xi]
+
+        # # Nominal noisy control
+        v_nom = u_cur_d[t, 0]
+        w_nom = u_cur_d[t, 1]
+        
+        # Forward simulate
+        x_curr[0] += dt_d*vtraction*v_nom*math.cos(x_curr[2])
+        x_curr[1] += dt_d*vtraction*v_nom*math.sin(x_curr[2])
+        x_curr[2] += dt_d*wtraction*w_nom
+
+        # Save state
+        state_rollout_batch_d[bid,t+1,0] = x_curr[0]
+        state_rollout_batch_d[bid,t+1,1] = x_curr[1]
+        state_rollout_batch_d[bid,t+1,2] = x_curr[2]
+    else:
+      
+      # Explicit unicycle update and map lookup
+      # From here on we assume grid is properly padded so map lookup remains valid
+      x_curr = cuda.local.array(3, numba.float32)
+      for i in range(3): 
+        x_curr[i] = x0_d[i]
+        state_rollout_batch_d[bid,0,i] = x0_d[i]
+
+      lin_ratio = 0.01*(lin_bin_values_bounds_d[1]-lin_bin_values_bounds_d[0])
+      ang_ratio = 0.01*(ang_bin_values_bounds_d[1]-ang_bin_values_bounds_d[0])
+      
+      for t in range(timesteps):
+        # Look up the traction parameters from map
+        xi = numba.int32((x_curr[0]-xlimits_d[0])//res_d)
+        yi = numba.int32((x_curr[1]-ylimits_d[0])//res_d)
+
+        vtraction = lin_bin_values_bounds_d[0] + lin_ratio*lin_sample_grid_batch_d[tid, yi, xi]
+        wtraction = ang_bin_values_bounds_d[0] + ang_ratio*ang_sample_grid_batch_d[tid, yi, xi]
+
+        # Nominal noisy control
+        v_nom = u_prev_d[t, 0] + noise_samples_d[bid, t, 0]
+        w_nom = u_prev_d[t, 1] + noise_samples_d[bid, t, 1]
+        v_noisy = max(vrange_d[0], min(vrange_d[1], v_nom))
+        w_noisy = max(wrange_d[0], min(wrange_d[1], w_nom))
+
+        # # Nominal noisy control
+        v_nom = u_prev_d[t, 0]
+        w_nom = u_prev_d[t, 1]
+        
+        # Forward simulate
+        x_curr[0] += dt_d*vtraction*v_noisy*math.cos(x_curr[2])
+        x_curr[1] += dt_d*vtraction*v_noisy*math.sin(x_curr[2])
+        x_curr[2] += dt_d*wtraction*w_noisy
+
+        # Save state
+        state_rollout_batch_d[bid,t+1,0] = x_curr[0]
+        state_rollout_batch_d[bid,t+1,1] = x_curr[1]
+        state_rollout_batch_d[bid,t+1,2] = x_curr[2]
+
+
 
 
   @staticmethod
   @cuda.jit(fastmath=True)
-  def get_state_rollout_numba(
+  def get_state_rollout_across_envs_numba(
           state_rollout_batch_d, # where to store results
           lin_sample_grid_batch_d,
           ang_sample_grid_batch_d,
@@ -885,7 +996,7 @@ class MPPI_Numba(object):
           u_cur_d):
     """
     Do a fixed number of rollouts for visualization within one block and many threads.
-    Assume kernel is launched as get_state_rollout_numba[1, NUM_THREADS]
+    Assume kernel is launched as get_state_rollout_across_envs_numba[1, NUM_THREADS]
     """
     
     tid = cuda.grid(1)
