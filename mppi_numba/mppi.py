@@ -27,8 +27,8 @@ def term_cost(dist2, v_post_rollout, goal_reached):
 # UNKNOWN_TIME_COST_RATIO = 1e3# 10.0
 # OBS_TIME_COST_RATIO = 1e10
 
-UNKNOWN_COST = np.float(1e2)
-OBS_COST = np.float(1e10)
+DEFAULT_UNKNOWN_COST = np.float(1e2)
+DEFAULT_OBS_COST = np.float(1e5)
 
 class MPPI_Numba(object):
 
@@ -182,15 +182,20 @@ class MPPI_Numba(object):
     cvar_alpha_d = np.float32(self.params['cvar_alpha'])
     x0_d = cuda.to_device(self.params['x0'].astype(np.float32))
     dt_d = np.float32(self.params['dt'])
+    obs_cost_d = np.float32(DEFAULT_OBS_COST if 'obs_penalty' not in self.params 
+                                     else self.params['obs_penalty'])
+    unknown_cost_d = np.float32(DEFAULT_UNKNOWN_COST if 'unknown_penalty' not in self.params 
+                                     else self.params['unknown_penalty'])
     return res_d, xlimits_d, ylimits_d, vrange_d, wrange_d, xgoal_d, \
            v_post_rollout_d, goal_tolerance_d, lambda_weight_d, \
-           u_std_d, cvar_alpha_d, x0_d, dt_d
+           u_std_d, cvar_alpha_d, x0_d, dt_d, obs_cost_d, unknown_cost_d
+
 
   def solve_nom_dyn_w_speed_map(self):
     
     res_d, xlimits_d, ylimits_d, vrange_d, wrange_d, xgoal_d, \
            v_post_rollout_d, goal_tolerance_d, lambda_weight_d, \
-           u_std_d, cvar_alpha_d, x0_d, dt_d = self.move_mppi_task_vars_to_device()
+           u_std_d, cvar_alpha_d, x0_d, dt_d, obs_cost_d, unknown_cost_d = self.move_mppi_task_vars_to_device()
   
 
     lin_sample_grid_batch_d = self.lin_tdm.sample_grids() # get ref to device samples
@@ -220,6 +225,8 @@ class MPPI_Numba(object):
         wrange_d,
         xgoal_d,
         v_post_rollout_d,
+        obs_cost_d, 
+        unknown_cost_d,
         goal_tolerance_d,
         lambda_weight_d,
         u_std_d,
@@ -250,7 +257,7 @@ class MPPI_Numba(object):
 
     res_d, xlimits_d, ylimits_d, vrange_d, wrange_d, xgoal_d, \
            v_post_rollout_d, goal_tolerance_d, lambda_weight_d, \
-           u_std_d, cvar_alpha_d, x0_d, dt_d = self.move_mppi_task_vars_to_device()
+           u_std_d, cvar_alpha_d, x0_d, dt_d, obs_cost_d, unknown_cost_d = self.move_mppi_task_vars_to_device()
     
     lin_sample_grid_batch_d = self.lin_tdm.sample_grids() # get ref to device samples
     ang_sample_grid_batch_d = self.ang_tdm.sample_grids() # get ref to device samples
@@ -275,6 +282,8 @@ class MPPI_Numba(object):
         wrange_d,
         xgoal_d,
         v_post_rollout_d,
+        obs_cost_d, 
+        unknown_cost_d,
         goal_tolerance_d,
         lambda_weight_d,
         u_std_d,
@@ -306,7 +315,7 @@ class MPPI_Numba(object):
 
     res_d, xlimits_d, ylimits_d, vrange_d, wrange_d, xgoal_d, \
            v_post_rollout_d, goal_tolerance_d, lambda_weight_d, \
-           u_std_d, cvar_alpha_d, x0_d, dt_d = self.move_mppi_task_vars_to_device()
+           u_std_d, cvar_alpha_d, x0_d, dt_d, obs_cost_d, unknown_cost_d = self.move_mppi_task_vars_to_device()
     
     
     # Sample environment realizations for estimating cvar
@@ -337,6 +346,8 @@ class MPPI_Numba(object):
         wrange_d,
         xgoal_d,
         v_post_rollout_d,
+        obs_cost_d, 
+        unknown_cost_d,
         goal_tolerance_d,
         lambda_weight_d,
         u_std_d,
@@ -444,6 +455,8 @@ class MPPI_Numba(object):
           wrange_d, 
           xgoal_d, 
           v_post_rollout_d, 
+          obs_cost_d, 
+          unknown_cost_d,
           goal_tolerance_d, 
           lambda_weight_d, 
           u_std_d, 
@@ -514,8 +527,8 @@ class MPPI_Numba(object):
               (u_cur_d[t,0]/(u_std_d[0]**2))*noise_samples_d[bid,t,0] + (u_cur_d[t,1]/(u_std_d[1]**2))*noise_samples_d[bid,t, 1])
       
       # Separate obstacle and unknown cost
-      thread_cost_shared[tid] += obstacle_map_d[yi, xi]*OBS_COST
-      thread_cost_shared[tid] += unknown_map_d[yi, xi]*UNKNOWN_COST
+      thread_cost_shared[tid] += obstacle_map_d[yi, xi]*obs_cost_d
+      thread_cost_shared[tid] += unknown_map_d[yi, xi]*unknown_cost_d
       
 
       if dist_to_goal2<= goal_tolerance_d2:
@@ -584,6 +597,8 @@ class MPPI_Numba(object):
           wrange_d, 
           xgoal_d, 
           v_post_rollout_d, 
+          obs_cost_d, 
+          unknown_cost_d,
           goal_tolerance_d, 
           lambda_weight_d, 
           u_std_d, 
@@ -649,8 +664,8 @@ class MPPI_Numba(object):
               (u_cur_d[t,0]/(u_std_d[0]**2))*noise_samples_d[bid, t,0] + (u_cur_d[t,1]/(u_std_d[1]**2))*noise_samples_d[bid, t, 1])
 
       # Separate obstacle and unknown cost
-      costs_d[bid] += obstacle_map_d[yi, xi]*OBS_COST
-      costs_d[bid] += unknown_map_d[yi, xi]*UNKNOWN_COST
+      costs_d[bid] += obstacle_map_d[yi, xi]*obs_cost_d
+      costs_d[bid] += unknown_map_d[yi, xi]*unknown_cost_d
 
       if dist_to_goal2<= goal_tolerance_d2:
         goal_reached = True
@@ -679,6 +694,8 @@ class MPPI_Numba(object):
           xgoal_d, 
           v_post_rollout_d, 
           goal_tolerance_d, 
+          obs_cost_d, 
+          unknown_cost_d,
           lambda_weight_d, 
           u_std_d, 
           # cvar_alpha_d, # not used
@@ -762,8 +779,8 @@ class MPPI_Numba(object):
               (u_cur_d[t,0]/(u_std_d[0]**2))*noise_samples_d[bid, t,0] + (u_cur_d[t,1]/(u_std_d[1]**2))*noise_samples_d[bid, t, 1])
 
       # Separate obstacle and unknown cost
-      costs_d[bid] += obstacle_map_d[yi, xi]*OBS_COST
-      costs_d[bid] += unknown_map_d[yi, xi]*UNKNOWN_COST
+      costs_d[bid] += obstacle_map_d[yi, xi]*obs_cost_d
+      costs_d[bid] += unknown_map_d[yi, xi]*unknown_cost_d
 
       if dist_to_goal2<= goal_tolerance_d2:
         goal_reached = True
