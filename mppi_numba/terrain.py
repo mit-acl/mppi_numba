@@ -204,17 +204,6 @@ class TDM_Numba(object):
         # Initialize pmf grid and account for padding
         self.pmf_grid = np.zeros((self.num_pmf_bins, num_rows, num_cols), dtype=np.int8)
 
-        # Vars for holding obstacles and unknown masks
-        if (obstacle_map is not None) and (unknown_map is not None):
-            assert obstacle_map.shape==(num_rows, num_cols), "obstacle_map does not have the same XY dim as pmf grid."
-            assert unknown_map.shape==(num_rows, num_cols), "unknown_map does not have the same XY dim as pmf grid."
-
-            self.obstacle_map = np.asarray(obstacle_map).astype(np.int8).reshape(num_rows, num_cols)
-            self.unknown_map = np.asarray(unknown_map).astype(np.int8).reshape(num_rows, num_cols)
-        else:
-            self.obstacle_map = np.zeros((num_rows, num_cols), dtype=np.int8)
-            self.unknown_map = np.zeros((num_rows, num_cols), dtype=np.int8)
-        
         
         if self.use_det_dynamics:
             # Use dynamics computed based on cvar_alpha
@@ -329,11 +318,7 @@ class TDM_Numba(object):
         self.bin_values_d = cuda.to_device(bin_values)
         self.bin_values_bounds_d = cuda.to_device(bin_values_bounds)
 
-        # Also pad the obstacle and unknown mask
-        padded_obstacle_map = self.set_padding_2d(self.obstacle_map, self.max_speed_padding, self.dt, res)
-        padded_unknown_map = self.set_padding_2d(self.unknown_map, self.max_speed_padding, self.dt, res)
-        self.obstacle_map_d = cuda.to_device(padded_obstacle_map)
-        self.unknown_map_d = cuda.to_device(padded_unknown_map)
+        self.prepare_obstacle_and_unknown_map(obstacle_map, unknown_map, num_rows, num_cols, res)
         
         # Crop the original semantic map to fit in memory
         num_rows, num_cols = self.pmf_grid_d.shape[1:]
@@ -350,6 +335,28 @@ class TDM_Numba(object):
             return None
 
     
+    def prepare_obstacle_and_unknown_map(self, obstacle_map, unknown_map, num_rows, num_cols, res):
+                # Vars for holding obstacles and unknown masks
+        if obstacle_map is not None:
+            assert obstacle_map.shape==(num_rows, num_cols), "obstacle_map does not have the same XY dim as pmf grid."
+            self.obstacle_map = np.asarray(obstacle_map).astype(np.int8).reshape(num_rows, num_cols)
+        else:
+            self.obstacle_map = np.zeros((num_rows, num_cols), dtype=np.int8)
+
+        if unknown_map is not None:
+            assert unknown_map.shape==(num_rows, num_cols), "unknown_map does not have the same XY dim as pmf grid."
+            self.unknown_map = np.asarray(unknown_map).astype(np.int8).reshape(num_rows, num_cols)
+        else:
+            self.unknown_map = np.zeros((num_rows, num_cols), dtype=np.int8)
+        
+        # Also pad the obstacle and unknown mask
+        padded_obstacle_map = self.set_padding_2d(self.obstacle_map, self.max_speed_padding, self.dt, res)
+        padded_unknown_map = self.set_padding_2d(self.unknown_map, self.max_speed_padding, self.dt, res)
+        self.obstacle_map_d = cuda.to_device(padded_obstacle_map)
+        self.unknown_map_d = cuda.to_device(padded_unknown_map)
+
+
+
     # def set_TDM_from_costmap(self, costmap_dict, obstacle_map=None, unknown_map=None):
 
     #     assert self.use_costmap, "set_TDM_from_costmap is invoked when self.use_costmap is not True"
@@ -437,17 +444,6 @@ class TDM_Numba(object):
         self.bin_values_d = cuda.to_device(self.bin_values)
         self.bin_values_bounds_d = cuda.to_device(self.bin_values_bounds)
 
-        # Vars for holding obstacles and unknown masks
-        if (obstacle_map is not None) and (unknown_map is not None):
-            assert obstacle_map.shape==(num_rows, num_cols), "obstacle_map does not have the same XY dim as pmf grid."
-            assert unknown_map.shape==(num_rows, num_cols), "unknown_map does not have the same XY dim as pmf grid."
-
-            self.obstacle_map = np.asarray(obstacle_map).astype(np.int8).reshape(num_rows, num_cols)
-            self.unknown_map = np.asarray(unknown_map).astype(np.int8).reshape(num_rows, num_cols)
-        else:
-            self.obstacle_map = np.zeros((num_rows, num_cols), dtype=np.int8)
-            self.unknown_map = np.zeros((num_rows, num_cols), dtype=np.int8)
-        
         if self.use_det_dynamics:
             if (np.sum(pmf_grid, axis=0)!=100).any():
                 print("WARNING: the provided PMF has columns that don't sum up to 100: {}".fromat(
@@ -550,13 +546,7 @@ class TDM_Numba(object):
         #     = self.set_padding(self.pmf_grid, self.obstacle_map, self.unknown_map, self.max_speed_padding, self.dt, res, self.xlimits, self.ylimits)
         # self.pmf_grid_d = cuda.to_device(padded_pmf_grid)
 
-        # Also pad the obstacle and unknown mask
-        padded_obstacle_map = self.set_padding_2d(self.obstacle_map, self.max_speed_padding, self.dt, res)
-        padded_unknown_map = self.set_padding_2d(self.unknown_map, self.max_speed_padding, self.dt, res)
-        self.obstacle_map_d = cuda.to_device(padded_obstacle_map)
-        self.unknown_map_d = cuda.to_device(padded_unknown_map)
-        self.obstacle_map_d = cuda.to_device(padded_obstacle_map)
-        self.unknown_map_d = cuda.to_device(padded_unknown_map)
+        self.prepare_obstacle_and_unknown_map(obstacle_map, unknown_map, num_rows, num_cols, res)
 
         self.pmf_grid_initialized = True
 

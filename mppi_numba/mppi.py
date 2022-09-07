@@ -27,6 +27,9 @@ def term_cost(dist2, v_post_rollout, goal_reached):
 UNKNOWN_TIME_COST_RATIO = 1e3# 10.0
 OBS_TIME_COST_RATIO = 1e10
 
+UNKNOWN_COST = np.float(1e3)
+OBS_COST = np.float(1e10)
+
 class MPPI_Numba(object):
 
   def __init__(self, cfg):
@@ -154,7 +157,7 @@ class MPPI_Numba(object):
     if self.use_det_dynamics:
       # print("MPPI uses CVAR dynamics.")
       return self.solve_det_dyn()
-    elif self.use_nom_dynamics_with_speed_map or self.use_costmap:
+    elif self.use_nom_dynamics_with_speed_map: #  or self.use_costmap:
       # print("MPPI uses nominal dynamics with risk-adjusted cost.")
       return self.solve_nom_dyn_w_speed_map()
     elif self.use_tdm:
@@ -208,6 +211,8 @@ class MPPI_Numba(object):
         self.lin_tdm.risk_traction_map_d,
         self.lin_tdm.bin_values_bounds_d,
         self.ang_tdm.bin_values_bounds_d,
+        self.lin_tdm.obstacle_map_d, # just use values from lin_tdm since ang_tdm produces the same values
+        self.lin_tdm.unknown_map_d,
         res_d,
         xlimits_d,
         ylimits_d,
@@ -261,6 +266,8 @@ class MPPI_Numba(object):
         ang_sample_grid_batch_d,
         self.lin_tdm.bin_values_bounds_d,
         self.ang_tdm.bin_values_bounds_d,
+        self.lin_tdm.obstacle_map_d,
+        self.lin_tdm.unknown_map_d,
         res_d,
         xlimits_d,
         ylimits_d,
@@ -321,6 +328,8 @@ class MPPI_Numba(object):
         ang_sample_grid_batch_d,
         self.lin_tdm.bin_values_bounds_d,
         self.ang_tdm.bin_values_bounds_d,
+        self.lin_tdm.obstacle_map_d,
+        self.lin_tdm.unknown_map_d,
         res_d,
         xlimits_d,
         ylimits_d,
@@ -426,6 +435,8 @@ class MPPI_Numba(object):
           ang_sample_grid_batch_d,
           lin_bin_values_bounds_d,
           ang_bin_values_bounds_d,
+          obstacle_map_d,
+          unknown_map_d,
           res_d, 
           xlimits_d, 
           ylimits_d, 
@@ -498,10 +509,15 @@ class MPPI_Numba(object):
       x_curr[2] += dt_d*wtraction*w_noisy
 
       dist_to_goal2 = (xgoal_d[0]-x_curr[0])**2 + (xgoal_d[1]-x_curr[1])**2
-      thread_cost_shared[tid]+=stage_cost(dist_to_goal2, dt_d, 1.0)
+      thread_cost_shared[tid] += stage_cost(dist_to_goal2, dt_d, 1.0)
       thread_cost_shared[tid] += lambda_weight_d*(
               (u_cur_d[t,0]/(u_std_d[0]**2))*noise_samples_d[bid,t,0] + (u_cur_d[t,1]/(u_std_d[1]**2))*noise_samples_d[bid,t, 1])
       
+      # Separate obstacle and unknown cost
+      thread_cost_shared[tid] += obstacle_map_d[yi, xi]*OBS_COST
+      thread_cost_shared[tid] += unknown_map_d[yi, xi]*UNKNOWN_COST
+      
+
       if dist_to_goal2<= goal_tolerance_d2:
         goal_reached = True
         break
@@ -559,6 +575,8 @@ class MPPI_Numba(object):
           ang_sample_grid_batch_d,
           lin_bin_values_bounds_d,
           ang_bin_values_bounds_d,
+          obstacle_map_d,
+          unknown_map_d,
           res_d, 
           xlimits_d, 
           ylimits_d, 
@@ -630,6 +648,10 @@ class MPPI_Numba(object):
       costs_d[bid] += lambda_weight_d*(
               (u_cur_d[t,0]/(u_std_d[0]**2))*noise_samples_d[bid, t,0] + (u_cur_d[t,1]/(u_std_d[1]**2))*noise_samples_d[bid, t, 1])
 
+      # Separate obstacle and unknown cost
+      costs_d[bid] += obstacle_map_d[yi, xi]*OBS_COST
+      costs_d[bid] += unknown_map_d[yi, xi]*UNKNOWN_COST
+
       if dist_to_goal2<= goal_tolerance_d2:
         goal_reached = True
         break
@@ -647,6 +669,8 @@ class MPPI_Numba(object):
           lin_risk_traction_map_d,
           lin_bin_values_bounds_d,
           ang_bin_values_bounds_d,
+          obstacle_map_d,
+          unknown_map_d,
           res_d, 
           xlimits_d,
           ylimits_d,
@@ -722,17 +746,24 @@ class MPPI_Numba(object):
       # If else statements will be expensive
       dist_to_goal2 = (xgoal_d[0]-x_curr[0])**2 + (xgoal_d[1]-x_curr[1])**2
       
-      if lin_risk_traction_map_d[0, yi, xi]>=0:
-        vtraction = lin_bin_values_bounds_d[0]+lin_ratio*lin_risk_traction_map_d[0, yi, xi]
-        costs_d[bid]+= stage_cost(dist_to_goal2, dt_d/(vtraction+1e-6), 1.0)
-      elif lin_risk_traction_map_d[0, yi, xi] == -1:
-        costs_d[bid]+= stage_cost(dist_to_goal2, dt_d*UNKNOWN_TIME_COST_RATIO, 1.0)
-      elif lin_risk_traction_map_d[0, yi, xi] == -2:
-        costs_d[bid]+= stage_cost(dist_to_goal2, dt_d*OBS_TIME_COST_RATIO, 1.0)
+
+      # # TODO: remove if/else here, use obstacle and unknown map to directly impose costs.
+      # if lin_risk_traction_map_d[0, yi, xi]>=0:
+      #   vtraction = lin_bin_values_bounds_d[0]+lin_ratio*lin_risk_traction_map_d[0, yi, xi]
+      #   costs_d[bid]+= stage_cost(dist_to_goal2, dt_d/(vtraction+1e-6), 1.0)
+      # elif lin_risk_traction_map_d[0, yi, xi] == -1:
+      #   costs_d[bid]+= stage_cost(dist_to_goal2, dt_d*UNKNOWN_TIME_COST_RATIO, 1.0)
+      # elif lin_risk_traction_map_d[0, yi, xi] == -2:
+      #   costs_d[bid]+= stage_cost(dist_to_goal2, dt_d*OBS_TIME_COST_RATIO, 1.0)
       
+      effective_speed = lin_bin_values_bounds_d[0]+lin_ratio*lin_risk_traction_map_d[0, yi, xi]
+      costs_d[bid]+= stage_cost(dist_to_goal2, dt_d/(effective_speed+1e-6), 1.0)
       costs_d[bid] += lambda_weight_d*(
               (u_cur_d[t,0]/(u_std_d[0]**2))*noise_samples_d[bid, t,0] + (u_cur_d[t,1]/(u_std_d[1]**2))*noise_samples_d[bid, t, 1])
 
+      # Separate obstacle and unknown cost
+      costs_d[bid] += obstacle_map_d[yi, xi]*OBS_COST
+      costs_d[bid] += unknown_map_d[yi, xi]*UNKNOWN_COST
 
       if dist_to_goal2<= goal_tolerance_d2:
         goal_reached = True
