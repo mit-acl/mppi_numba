@@ -24,10 +24,10 @@ def term_cost(dist2, v_post_rollout, goal_reached):
 
 
 # To handle unknown and obstacles
-UNKNOWN_TIME_COST_RATIO = 1e3# 10.0
-OBS_TIME_COST_RATIO = 1e10
+# UNKNOWN_TIME_COST_RATIO = 1e3# 10.0
+# OBS_TIME_COST_RATIO = 1e10
 
-UNKNOWN_COST = np.float(1e3)
+UNKNOWN_COST = np.float(1e2)
 OBS_COST = np.float(1e10)
 
 class MPPI_Numba(object):
