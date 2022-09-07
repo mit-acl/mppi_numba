@@ -12,6 +12,18 @@ from .config import Config
 # Requested support for N-D shared array: https://github.com/numba/numba/issues/2463
 
 
+# Stage costs
+@cuda.jit('float32(float32, float32, float32)', device=True, inline=True)
+def stage_cost(dist2, dt, dist_weight):
+  return dt + dist_weight*dist2
+
+# Terminal costs
+@cuda.jit('float32(float32, float32, boolean)', device=True, inline=True)
+def term_cost(dist2, v_post_rollout, goal_reached):
+  return (1-np.float32(goal_reached))*dist2/(v_post_rollout+1e-6)
+
+
+
 class MPPI_Numba(object):
 
   def __init__(self, cfg):
@@ -394,6 +406,9 @@ class MPPI_Numba(object):
 
   """GPU kernels"""
 
+  # Can we define helper function for stage cost?
+  
+
   @staticmethod
   @cuda.jit(fastmath=True)
   def rollout_numba(
@@ -452,8 +467,6 @@ class MPPI_Numba(object):
 
     lin_ratio = 0.01*(lin_bin_values_bounds_d[1]-lin_bin_values_bounds_d[0])
     ang_ratio = 0.01*(ang_bin_values_bounds_d[1]-ang_bin_values_bounds_d[0])
-
-    # PI2 = numba.float32(math.pi*2.0)
     
     for t in range(timesteps):
       # Look up the traction parameters from map
@@ -474,21 +487,16 @@ class MPPI_Numba(object):
       x_curr[1] += dt_d*vtraction*v_noisy*math.sin(x_curr[2])
       x_curr[2] += dt_d*wtraction*w_noisy
 
-      # Clip angle values within [0, 2pi] (Hmm don't think is needed)
-      # x_curr[2] = math.fmod(math.fmod(x_curr[2], PI2)+PI2, PI2)
-
-      # Accumulate cost starting at the initial state
-      thread_cost_shared[tid]+=dt_d
       dist_to_goal2 = (xgoal_d[0]-x_curr[0])**2 + (xgoal_d[1]-x_curr[1])**2
+      thread_cost_shared[tid]+=stage_cost(dist_to_goal2, dt_d, 1.0)
+      
       if dist_to_goal2<= goal_tolerance_d2:
         goal_reached = True
         break
-      
-      
+    
     # Accumulate terminal cost 
-    if not goal_reached:
-      thread_cost_shared[tid] += math.sqrt(dist_to_goal2)/v_post_rollout_d
-
+    thread_cost_shared[tid] += term_cost(dist_to_goal2, v_post_rollout_d, goal_reached)
+      
     # Accumulate the missing stage cost
     for t in range(timesteps):
       thread_cost_shared[tid] += lambda_weight_d*(
@@ -604,16 +612,16 @@ class MPPI_Numba(object):
       x_curr[1] += dt_d*vtraction*v_noisy*math.sin(x_curr[2])
       x_curr[2] += dt_d*wtraction*w_noisy
 
-      # Accumulate cost starting at the initial state
-      costs_d[bid]+=dt_d
+
       dist_to_goal2 = (xgoal_d[0]-x_curr[0])**2 + (xgoal_d[1]-x_curr[1])**2
+      costs_d[bid]+=stage_cost(dist_to_goal2, dt_d, 1.0)
+      
       if dist_to_goal2<= goal_tolerance_d2:
         goal_reached = True
         break
-      
+    
     # Accumulate terminal cost 
-    if not goal_reached:
-      costs_d[bid] += math.sqrt(dist_to_goal2)/v_post_rollout_d
+    costs_d[bid] += term_cost(dist_to_goal2, v_post_rollout_d, goal_reached)
 
     # Accumulate the missing stage cost
     for t in range(timesteps):
@@ -694,24 +702,26 @@ class MPPI_Numba(object):
       # Accumulate (risk-speed adjusted) cost starting at the initial state
 
       # If else statements will be expensive
+      dist_to_goal2 = (xgoal_d[0]-x_curr[0])**2 + (xgoal_d[1]-x_curr[1])**2
+      
       if lin_risk_traction_map_d[0, yi, xi]>=0:
         vtraction = lin_bin_values_bounds_d[0]+lin_ratio*lin_risk_traction_map_d[0, yi, xi]
-        costs_d[bid]+=(dt_d/(vtraction+1e-6)) # avoid div by 0
+        # costs_d[bid]+=(dt_d/(vtraction+1e-6)) # avoid div by 0
+        costs_d[bid]+= stage_cost(dist_to_goal2, dt_d/(vtraction+1e-6), 1.0)
       elif lin_risk_traction_map_d[0, yi, xi] == -1:
-        costs_d[bid] += dt_d*UNKNOWN_COST_RATIO
+        # costs_d[bid] += dt_d*UNKNOWN_COST_RATIO
+        costs_d[bid]+= stage_cost(dist_to_goal2, dt_d*UNKNOWN_COST_RATIO, 1.0)
       elif lin_risk_traction_map_d[0, yi, xi] == -2:
-        costs_d[bid] += dt_d*OBS_COST_RATIO
-        break # no need to loop if in collision
+        # costs_d[bid] += dt_d*OBS_COST_RATIO
+        costs_d[bid]+= stage_cost(dist_to_goal2, dt_d*OBS_COST_RATIO, 1.0)
       
-
-      dist_to_goal2 = (xgoal_d[0]-x_curr[0])**2 + (xgoal_d[1]-x_curr[1])**2
       if dist_to_goal2<= goal_tolerance_d2:
         goal_reached = True
         break
-      
+    
     # Accumulate terminal cost 
-    if not goal_reached:
-      costs_d[bid] += math.sqrt(dist_to_goal2)/v_post_rollout_d
+    costs_d[bid] += term_cost(dist_to_goal2, v_post_rollout_d, goal_reached)
+
 
     # Accumulate the missing stage cost
     for t in range(timesteps):
