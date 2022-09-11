@@ -15,7 +15,7 @@ from .config import Config
 # Stage costs
 @cuda.jit('float32(float32, float32, float32)', device=True, inline=True)
 def stage_cost(dist2, dt, dist_weight):
-  return dt + dist_weight*dist2
+  return dt + dist_weight*math.sqrt(dist2) # squared term makes the robot move faster
 
 # Terminal costs
 @cuda.jit('float32(float32, float32, boolean)', device=True, inline=True)
@@ -29,6 +29,7 @@ def term_cost(dist2, v_post_rollout, goal_reached):
 
 DEFAULT_UNKNOWN_COST = np.float(1e2)
 DEFAULT_OBS_COST = np.float(1e5)
+DEFAULT_DIST_WEIGHT = 1.0
 
 class MPPI_Numba(object):
 
@@ -336,7 +337,8 @@ class MPPI_Numba(object):
 
       # Use trick to dynamically allocate shared array in kernel: # https://stackoverflow.com/questions/30510580/numba-cuda-shared-memory-size-at-runtime
       stream = 0
-      shared_array_size = self.num_grid_samples * np.float32().itemsize # how many bytes of shared array size?
+      # shared_array_size = self.num_grid_samples * np.float32().itemsize # how many bytes of shared array size?
+      shared_array_size = 10*self.num_grid_samples * np.float32().itemsize # how many bytes of shared array size?
       # Rollout and compute mean or cvar
       self.rollout_numba[self.num_control_rollouts, self.num_grid_samples, stream, shared_array_size](
         lin_sample_grid_batch_d,
@@ -539,7 +541,7 @@ class MPPI_Numba(object):
       x_curr[2] += dt_d*wtraction*w_noisy
 
       dist_to_goal2 = (xgoal_d[0]-x_curr[0])**2 + (xgoal_d[1]-x_curr[1])**2
-      thread_cost_shared[tid] += stage_cost(dist_to_goal2, dt_d, 1.0)
+      thread_cost_shared[tid] += stage_cost(dist_to_goal2, dt_d, DEFAULT_DIST_WEIGHT)
       thread_cost_shared[tid] += lambda_weight_d*(
               (u_cur_d[t,0]/(u_std_d[0]**2))*noise_samples_d[bid,t,0] + (u_cur_d[t,1]/(u_std_d[1]**2))*noise_samples_d[bid,t, 1])
       
@@ -676,7 +678,7 @@ class MPPI_Numba(object):
 
 
       dist_to_goal2 = (xgoal_d[0]-x_curr[0])**2 + (xgoal_d[1]-x_curr[1])**2
-      costs_d[bid]+=stage_cost(dist_to_goal2, dt_d, 1.0)
+      costs_d[bid]+=stage_cost(dist_to_goal2, dt_d, DEFAULT_DIST_WEIGHT)
       costs_d[bid] += lambda_weight_d*(
               (u_cur_d[t,0]/(u_std_d[0]**2))*noise_samples_d[bid, t,0] + (u_cur_d[t,1]/(u_std_d[1]**2))*noise_samples_d[bid, t, 1])
 
@@ -780,7 +782,7 @@ class MPPI_Numba(object):
       dist_to_goal2 = (xgoal_d[0]-x_curr[0])**2 + (xgoal_d[1]-x_curr[1])**2
       
       effective_speed = lin_bin_values_bounds_d[0]+lin_ratio*lin_risk_traction_map_d[0, yi, xi]
-      costs_d[bid]+= stage_cost(dist_to_goal2, dt_d/(effective_speed+1e-6), 1.0)
+      costs_d[bid]+= stage_cost(dist_to_goal2, dt_d/(effective_speed+1e-6), DEFAULT_DIST_WEIGHT)
       costs_d[bid] += lambda_weight_d*(
               (u_cur_d[t,0]/(u_std_d[0]**2))*noise_samples_d[bid, t,0] + (u_cur_d[t,1]/(u_std_d[1]**2))*noise_samples_d[bid, t, 1])
 

@@ -44,16 +44,19 @@ class TDM_Visualizer(object):
         self.semantic_grid[self.pad_width:(self.num_rows-self.pad_width), self.pad_width:(self.num_cols-self.pad_width)] = original_semantic_grid[:self.num_rows-2*self.pad_width, :self.num_cols - 2*self.pad_width]
             
 
-    def draw(self, figsize=(10,10)):
+    def draw(self, figsize=(10,10), ax=None):
         if not self.semantic_grid_initialized:
             print("Semantic grid not initialized. Cannot invoke draw() function")
             return
 
-        if figsize is None:
+        if figsize is None and ax is None:
+            # Use user supplied axis
+            fig, ax = self.draw_base_grid(ax=ax)
+        elif figsize is None:
             self.figsize = self.calc_auto_figsize(self.xlimits, self.ylimits)
-            fig, ax = self.draw_base_grid(self.figsize)
+            fig, ax = self.draw_base_grid(self.figsize, ax=ax)
         else:
-            fig, ax = self.draw_base_grid(figsize)
+            fig, ax = self.draw_base_grid(figsize, ax=ax)
 
         if self.semantic_grid_initialized:
             self.draw_semantic_patches(ax)
@@ -61,7 +64,7 @@ class TDM_Visualizer(object):
             print("Colors not shown as semantic grid is not initialized.")
         return fig, ax
     
-    def draw_base_grid(self, figsize):
+    def draw_base_grid(self, figsize, ax=None):
         cols, rows = self.num_cols, self.num_rows
         minx, maxx = self.xlimits
         miny, maxy = self.ylimits
@@ -70,21 +73,27 @@ class TDM_Visualizer(object):
 
         x = list(map(lambda i: minx + width*i, range(cols+1)))
         y = list(map(lambda i: miny + height*i, range(rows+1)))
-
-        fig = plt.figure(figsize=figsize)
-
         hlines = np.column_stack(np.broadcast_arrays(x[0], y, x[-1], y))
         vlines = np.column_stack(np.broadcast_arrays(x, y[0], x, y[-1]))
         lines = np.concatenate([hlines, vlines]).reshape(-1, 2, 2)
-        line_collection = LineCollection(lines, color="black", linewidths=0.5)
-        ax = plt.gca()
-        ax.add_collection(line_collection)
-        ax.set_xlim(x[0]-1, x[-1]+1)
-        ax.set_ylim(y[0]-1, y[-1]+1)
-        plt.gca().set_aspect('equal', adjustable='box')
-        plt.axis('off')
+        line_collection = LineCollection(lines, color="black", linewidths=0.5, alpha=0.5)
 
-        return fig, plt.gca()
+        if ax is None:
+            fig, ax = plt.subplots(figsize=figsize)
+            ax = plt.gca()
+            ax.add_collection(line_collection)
+            ax.set_xlim(x[0]-1, x[-1]+1)
+            ax.set_ylim(y[0]-1, y[-1]+1)
+            plt.gca().set_aspect('equal', adjustable='box')
+            plt.axis('off')
+            return fig, ax
+        else:
+            ax.add_collection(line_collection)
+            ax.set_xlim(x[0]-1, x[-1]+1)
+            ax.set_ylim(y[0]-1, y[-1]+1)
+            ax.set_aspect('equal', adjustable='box')
+            ax.axis('off')
+            return plt.gcf(), ax
 
     def calc_auto_figsize(self, xlimits, ylimits):
         (minx, maxx) = xlimits
@@ -122,7 +131,7 @@ class TDM_Visualizer(object):
     
 
 
-def vis_density(ax, density, terrain, vis_cvar_alpha, show_cvar=False, color='b', title=None, hist_alpha=0.5):
+def vis_density(ax, density, terrain, vis_cvar_alpha, show_cvar=False, color='b', show_legend=True, title=None, hist_alpha=0.5, fontsize=12):
     cvar, thres = density.cvar(alpha=vis_cvar_alpha)
     if density.sample_initialized:
         ax.hist(density.samples, bins=100, density=True, color=color, alpha=hist_alpha, label=terrain.name)
@@ -132,13 +141,13 @@ def vis_density(ax, density, terrain, vis_cvar_alpha, show_cvar=False, color='b'
     if density.sample_bounds is not None:
         ax.set_xlim(density.sample_bounds)
     if title is not None:
-        ax.set_title(title)
+        ax.set_title(title, fontsize=fontsize)
         
         
-    ax.set_xlabel("Traction")
-    ax.set_ylabel("Density")
-        
-    ax.legend()
+    ax.set_xlabel("Traction", fontsize=fontsize)
+    ax.set_ylabel("Density", fontsize=fontsize)
+    if show_legend:
+        ax.legend(fontsize=fontsize)
     return ax
 
 def vis_density_as_pmf(ax, density, terrain, num_bins, include_min_max=True, color='b', title=None, hist_alpha=0.5):
