@@ -11,18 +11,28 @@ class TDM_Visualizer(object):
     PREFERRED_MAX_FIG_WIDTH = 12
     PREFERRED_MAX_FIG_HEIGHT = 8
 
-    def __init__(self, tdm):
-        self.semantic_grid_initialized = tdm.semantic_grid_initialized
+    def __init__(self, tdm, tdm_contains_semantic_grid=True):
+        
+        if tdm_contains_semantic_grid:
+        
+            self.semantic_grid_initialized = tdm.semantic_grid_initialized
+            self.semantic_grid = copy.deepcopy(tdm.semantic_grid)
+            self.id2name = copy.deepcopy(tdm.id2name)
+            self.name2terrain = copy.deepcopy(tdm.name2terrain)
+            self.id2terrain_fn = copy.deepcopy(tdm.id2terrain_fn)
+            self.id2rgb = {sid: self.id2terrain_fn(sid).rgb for sid in self.id2name}
+            self.terrain2pmf = copy.deepcopy(tdm.terrain2pmf)
+            self.semantic_grid_initialized = tdm.semantic_grid_initialized
+            self.id2name[-1] = "Padding"
+            self.id2rgb[-1] = (0,0,0,)
+        else:
+            self.semantic_grid_initialized= False
+        
+        
         self.ylimits = copy.deepcopy(tdm.ylimits)
         self.xlimits = copy.deepcopy(tdm.xlimits)
 
-        self.semantic_grid = copy.deepcopy(tdm.semantic_grid)
-        self.id2name = copy.deepcopy(tdm.id2name)
-        self.name2terrain = copy.deepcopy(tdm.name2terrain)
-        self.id2terrain_fn = copy.deepcopy(tdm.id2terrain_fn)
-        self.id2rgb = {sid: self.id2terrain_fn(sid).rgb for sid in self.id2name}
-        self.terrain2pmf = copy.deepcopy(tdm.terrain2pmf)
-        self.semantic_grid_initialized = tdm.semantic_grid_initialized
+        
         self.cell_dimensions = copy.deepcopy(tdm.cell_dimensions)
         self.xlimits = copy.deepcopy(tdm.padded_xlimits)
         self.ylimits = copy.deepcopy(tdm.padded_ylimits)
@@ -32,20 +42,21 @@ class TDM_Visualizer(object):
         
         # If padded, create new semantic_grid and update color (using black?)
         self.pad_width = tdm.pad_cells
-        self.id2name[-1] = "Padding"
-        self.id2rgb[-1] = (0,0,0,)
+
 
 
         return_v = tdm.get_padded_grid_xy_dim()
         assert return_v is not None, "Cannot get padded grid dimension from TDM."
         self.num_rows, self.num_cols = copy.deepcopy(return_v)
-        original_semantic_grid = copy.deepcopy(self.semantic_grid)
-        self.semantic_grid = -1*np.ones((self.num_rows, self.num_cols))
-        self.semantic_grid[self.pad_width:(self.num_rows-self.pad_width), self.pad_width:(self.num_cols-self.pad_width)] = original_semantic_grid[:self.num_rows-2*self.pad_width, :self.num_cols - 2*self.pad_width]
+        
+        if tdm_contains_semantic_grid:
+            original_semantic_grid = copy.deepcopy(self.semantic_grid)
+            self.semantic_grid = -1*np.ones((self.num_rows, self.num_cols))
+            self.semantic_grid[self.pad_width:(self.num_rows-self.pad_width), self.pad_width:(self.num_cols-self.pad_width)] = original_semantic_grid[:self.num_rows-2*self.pad_width, :self.num_cols - 2*self.pad_width]
             
 
-    def draw(self, figsize=(10,10), ax=None):
-        if not self.semantic_grid_initialized:
+    def draw(self, figsize=(10,10), ax=None, semantic_grid=None, id2rgb_map=None):
+        if (not self.semantic_grid_initialized) and (semantic_grid is None) and (id2rgb_map is None):
             print("Semantic grid not initialized. Cannot invoke draw() function")
             return
 
@@ -60,6 +71,11 @@ class TDM_Visualizer(object):
 
         if self.semantic_grid_initialized:
             self.draw_semantic_patches(ax)
+        elif (semantic_grid is not None) and (id2rgb_map is not None):
+            original_semantic_grid = copy.deepcopy(semantic_grid)
+            semantic_grid = -1*np.ones((self.num_rows, self.num_cols))
+            semantic_grid[self.pad_width:(self.num_rows-self.pad_width), self.pad_width:(self.num_cols-self.pad_width)] = original_semantic_grid[:self.num_rows-2*self.pad_width, :self.num_cols - 2*self.pad_width]
+            self.draw_semantic_patches(ax, semantic_grid=semantic_grid, id2rgb_map=id2rgb_map)
         else:
             print("Colors not shown as semantic grid is not initialized.")
         return fig, ax
@@ -118,20 +134,31 @@ class TDM_Visualizer(object):
         width, height = self.cell_dimensions
         return minx + (ix+0.5) * width, miny + (iy+0.5) * height
 
-    def draw_semantic_patches(self, ax):
-        collection_recs = PolyCollection(self.get_all_cell_verts(), facecolors=self.get_terrain_rgbs())
+    def draw_semantic_patches(self, ax, semantic_grid=None, id2rgb_map=None):
+        if (semantic_grid is None) or (id2rgb_map is None):
+            collection_recs = PolyCollection(self.get_all_cell_verts(), facecolors=self.get_terrain_rgbs())
+        else:
+            collection_recs = PolyCollection(self.get_all_cell_verts(semantic_grid=semantic_grid),
+             facecolors=self.get_terrain_rgbs(id2rgb_map=id2rgb_map,semantic_grid=semantic_grid))
+
         ax.add_collection(collection_recs)
         
-    def get_all_cell_verts(self):
-        num_rows, num_cols = self.semantic_grid.shape
+    def get_all_cell_verts(self, semantic_grid=None):
+        if semantic_grid is None:
+            num_rows, num_cols = self.semantic_grid.shape
+        else:
+            num_rows, num_cols = semantic_grid.shape
         return [self.cell_verts(ix, iy) for iy in range(num_rows) for ix in range(num_cols) ]
     
-    def get_terrain_rgbs(self):
-        return [self.id2rgb[sid] for sid in self.semantic_grid.reshape(-1)]
+    def get_terrain_rgbs(self, id2rgb_map=None, semantic_grid=None):
+        if (id2rgb_map is None) or (semantic_grid is None):
+            return [self.id2rgb[sid] for sid in self.semantic_grid.reshape(-1)]
+        else:
+            return [id2rgb_map[sid] for sid in semantic_grid.reshape(-1)]
     
 
 
-def vis_density(ax, density, terrain, vis_cvar_alpha, show_cvar=False, color='b', show_legend=True, title=None, hist_alpha=0.5, fontsize=12):
+def vis_density(ax, density, terrain, vis_cvar_alpha=0.3, show_cvar=False, color='b', show_legend=True, title=None, hist_alpha=0.5, fontsize=12):
     cvar, thres = density.cvar(alpha=vis_cvar_alpha)
     if density.sample_initialized:
         ax.hist(density.samples, bins=100, density=True, color=color, alpha=hist_alpha, label=terrain.name)

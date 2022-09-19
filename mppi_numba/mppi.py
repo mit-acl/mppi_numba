@@ -53,6 +53,10 @@ class MPPI_Numba(object):
     self.use_costmap = cfg.use_costmap
     self.det_dyn = self.use_det_dynamics or self.use_nom_dynamics_with_speed_map or self.use_costmap
 
+    # Basic info 
+    self.max_threads_per_block = cfg.max_threads_per_block
+
+
     # Initialize reuseable device variables
     self.noise_samples_d = None
     self.u_cur_d = None
@@ -168,7 +172,11 @@ class MPPI_Numba(object):
       return self.solve_nom_dyn_w_speed_map()
     elif self.use_tdm:
       # print("MPPI uses noisy unicycles")
-      return self.solve_stochastic()
+      if self.cfg.num_grid_samples>self.cfg.max_threads_per_block:
+        return self.solve_stochastic_oversized()
+      else:      
+        return self.solve_stochastic()
+
     else:
       print("None of the planner options are selected.")
       assert False
@@ -185,7 +193,7 @@ class MPPI_Numba(object):
     goal_tolerance_d = np.float32(self.params['goal_tolerance'])
     lambda_weight_d = np.float32(self.params['lambda_weight'])
     u_std_d = cuda.to_device(self.params['u_std'].astype(np.float32))
-    cvar_alpha_d = np.float32(self.params['cvar_alpha'])
+    cvar_alpha_d = np.float32(self.params['cvar_alpha']) # for computing cvar of objectives
     x0_d = cuda.to_device(self.params['x0'].astype(np.float32))
     dt_d = np.float32(self.params['dt'])
     obs_cost_d = np.float32(DEFAULT_OBS_COST if 'obs_penalty' not in self.params 
@@ -204,8 +212,10 @@ class MPPI_Numba(object):
            u_std_d, cvar_alpha_d, x0_d, dt_d, obs_cost_d, unknown_cost_d = self.move_mppi_task_vars_to_device()
   
 
-    lin_sample_grid_batch_d = self.lin_tdm.sample_grids() # get ref to device samples
-    ang_sample_grid_batch_d = self.ang_tdm.sample_grids() # get ref to device samples
+    lin_sample_grid_batch_d = self.lin_tdm.sample_grids(alpha_dyn=1.0) # get ref to device samples
+    ang_sample_grid_batch_d = self.ang_tdm.sample_grids(alpha_dyn=1.0) # get ref to device samples
+    # Weight for distance cost
+    dist_weight = DEFAULT_DIST_WEIGHT if 'dist_weight' not in self.params else self.params['dist_weight']
 
 
     # Optimization loop
@@ -238,6 +248,7 @@ class MPPI_Numba(object):
         u_std_d,
         x0_d,
         dt_d,
+        dist_weight,
         self.noise_samples_d,
         self.u_cur_d,
 
@@ -266,8 +277,13 @@ class MPPI_Numba(object):
            v_post_rollout_d, goal_tolerance_d, lambda_weight_d, \
            u_std_d, cvar_alpha_d, x0_d, dt_d, obs_cost_d, unknown_cost_d = self.move_mppi_task_vars_to_device()
     
+    # No need to pass alpha_dyn, since dynamics have been initialized to only allow sampling of the value that corresponds to cvar(alpha_dyn)
     lin_sample_grid_batch_d = self.lin_tdm.sample_grids() # get ref to device samples
     ang_sample_grid_batch_d = self.ang_tdm.sample_grids() # get ref to device samples
+
+    # Weight for distance cost
+    dist_weight = DEFAULT_DIST_WEIGHT if 'dist_weight' not in self.params else self.params['dist_weight']
+
 
     # Optimization loop
     for k in range(self.params['num_opt']):
@@ -296,6 +312,7 @@ class MPPI_Numba(object):
         u_std_d,
         x0_d,
         dt_d,
+        dist_weight,
         self.noise_samples_d,
         self.u_cur_d,
 
@@ -303,6 +320,81 @@ class MPPI_Numba(object):
         self.costs_d
       )
       self.u_prev_d = self.u_cur_d
+      # Compute cost and update the optimal control on device
+      self.update_useq_numba[1, 32](
+        lambda_weight_d, 
+        self.costs_d, 
+        self.noise_samples_d, 
+        self.weights_d, 
+        vrange_d,
+        wrange_d,
+        self.u_cur_d
+      )
+
+    # Full control sequence copied from GPU
+    return self.u_cur_d.copy_to_host()
+
+
+  def solve_stochastic_oversized(self):
+    # Handle the case where each block handles more than 1024 threads. Each thread needs to handle >1 rollout
+    # TODO: handle gracefully?
+    assert self.num_grid_samples > self.cfg.max_threads_per_block
+
+    res_d, xlimits_d, ylimits_d, vrange_d, wrange_d, xgoal_d, \
+        v_post_rollout_d, goal_tolerance_d, lambda_weight_d, \
+        u_std_d, cvar_alpha_d, x0_d, dt_d, obs_cost_d, unknown_cost_d = self.move_mppi_task_vars_to_device()
+    
+    
+    # Sample environment realizations for estimating cvar
+    lin_sample_grid_batch_d = self.lin_tdm.sample_grids(
+      1.0 if 'alpha_dyn' not in self.params else self.params['alpha_dyn']) # get ref to device samples (no modification required since num_grid_samples is the same as the number of blocks in TDM instead of number of threads)
+    ang_sample_grid_batch_d = self.ang_tdm.sample_grids(
+      1.0 if 'alpha_dyn' not in self.params else self.params['alpha_dyn']) # get ref to device samples (no modification required since num_grid_samples is the same as the number of blocks in TDM instead of number of threads)
+
+    # Weight for distance cost
+    dist_weight = DEFAULT_DIST_WEIGHT if 'dist_weight' not in self.params else self.params['dist_weight']
+
+    # Optimization loop
+    for k in range(self.params['num_opt']):
+      # Sample control noise
+      self.sample_noise_numba[self.num_control_rollouts, self.num_steps](
+            self.rng_states_d, u_std_d, self.noise_samples_d)
+
+      # Use trick to dynamically allocate shared array in kernel: # https://stackoverflow.com/questions/30510580/numba-cuda-shared-memory-size-at-runtime
+      stream = 0
+      shared_array_size = self.num_grid_samples * np.float32().itemsize # how many bytes of shared array size?
+      # Rollout and compute mean or cvar
+
+      # Getting errors: CUDA_ERROR_LAUNCH_OUT_OF_RESOURCES 
+      # Somehow have to limit the GPU register usage https://stackoverflow.com/questions/68658970/why-launching-a-numba-cuda-kernel-works-with-up-to-640-threads-but-fails-with-6
+      self.rollout_oversized_numba[self.num_control_rollouts, self.max_threads_per_block, stream, shared_array_size](
+        lin_sample_grid_batch_d,
+        ang_sample_grid_batch_d,
+        self.lin_tdm.bin_values_bounds_d,
+        self.ang_tdm.bin_values_bounds_d,
+        self.lin_tdm.obstacle_map_d,
+        self.lin_tdm.unknown_map_d,
+        res_d,
+        xlimits_d,
+        ylimits_d,
+        vrange_d,
+        wrange_d,
+        xgoal_d,
+        v_post_rollout_d,
+        obs_cost_d, 
+        unknown_cost_d,
+        goal_tolerance_d,
+        lambda_weight_d,
+        u_std_d,
+        cvar_alpha_d,
+        x0_d,
+        dt_d,
+        dist_weight,
+        self.noise_samples_d,
+        self.u_cur_d,
+        self.costs_d # results
+      )
+
       # Compute cost and update the optimal control on device
       self.update_useq_numba[1, 32](
         lambda_weight_d, 
@@ -326,8 +418,13 @@ class MPPI_Numba(object):
     
     
     # Sample environment realizations for estimating cvar
-    lin_sample_grid_batch_d = self.lin_tdm.sample_grids() # get ref to device samples
-    ang_sample_grid_batch_d = self.ang_tdm.sample_grids() # get ref to device samples
+    lin_sample_grid_batch_d = self.lin_tdm.sample_grids(
+      1.0 if 'alpha_dyn' not in self.params else self.params['alpha_dyn']) # get ref to device samples
+    ang_sample_grid_batch_d = self.ang_tdm.sample_grids(
+      1.0 if 'alpha_dyn' not in self.params else self.params['alpha_dyn']) # get ref to device samples
+
+    # Weight for distance cost
+    dist_weight = DEFAULT_DIST_WEIGHT if 'dist_weight' not in self.params else self.params['dist_weight']
 
     # Optimization loop
     for k in range(self.params['num_opt']):
@@ -337,8 +434,7 @@ class MPPI_Numba(object):
 
       # Use trick to dynamically allocate shared array in kernel: # https://stackoverflow.com/questions/30510580/numba-cuda-shared-memory-size-at-runtime
       stream = 0
-      # shared_array_size = self.num_grid_samples * np.float32().itemsize # how many bytes of shared array size?
-      shared_array_size = 10*self.num_grid_samples * np.float32().itemsize # how many bytes of shared array size?
+      shared_array_size = self.num_grid_samples * np.float32().itemsize # how many bytes of shared array size?
       # Rollout and compute mean or cvar
       self.rollout_numba[self.num_control_rollouts, self.num_grid_samples, stream, shared_array_size](
         lin_sample_grid_batch_d,
@@ -362,6 +458,7 @@ class MPPI_Numba(object):
         cvar_alpha_d,
         x0_d,
         dt_d,
+        dist_weight,
         self.noise_samples_d,
         self.u_cur_d,
         self.costs_d # results
@@ -455,8 +552,173 @@ class MPPI_Numba(object):
 
   """GPU kernels"""
 
-  # Can we define helper function for stage cost?
-  
+  # If memory allocation error try reducing max registers
+  @staticmethod
+  @cuda.jit(fastmath=True, max_registers=60)
+  # @cuda.jit(fastmath=True)
+  def rollout_oversized_numba(
+          lin_sample_grid_batch_d,
+          ang_sample_grid_batch_d,
+          lin_bin_values_bounds_d,
+          ang_bin_values_bounds_d,
+          obstacle_map_d,
+          unknown_map_d,
+          res_d, 
+          xlimits_d, 
+          ylimits_d, 
+          vrange_d, 
+          wrange_d, 
+          xgoal_d, 
+          v_post_rollout_d, 
+          obs_cost_d, 
+          unknown_cost_d,
+          goal_tolerance_d, 
+          lambda_weight_d, 
+          u_std_d, 
+          cvar_alpha_d, 
+          x0_d, 
+          dt_d,
+          dist_weight_d,
+          noise_samples_d,
+          u_cur_d,
+          costs_d):
+    """
+    Every thread in each block considers different traction grids but the same control sequence.
+    Each block produces a single result (reduce a shared list to produce CVaR or mean. Is there a more efficient way to do this?)
+    """
+    # Basic info
+    bid = cuda.blockIdx.x   # index of block
+    tid = cuda.threadIdx.x  # index of thread within a block
+    num_threads = cuda.blockDim.x
+    num_grid_samples_d = lin_sample_grid_batch_d.shape[0]
+    repeat = numba.int32(math.ceil(num_grid_samples_d/num_threads))
+
+    # Figure out the start and end indices for environmental rollouts
+    gap = math.ceil(num_grid_samples_d / num_threads)
+    start_grid_i = min(tid*gap, num_grid_samples_d) # Cannot exceed num grids, but this should never happen
+    end_grid_i = min(start_grid_i+gap, num_grid_samples_d)
+
+    # Create shared array for saving temporary costs
+    # Use trick to dynamically allocate shared memory (only can be 1d)
+    # https://stackoverflow.com/questions/30510580/numba-cuda-shared-memory-size-at-runtime
+    thread_cost_shared = cuda.shared.array(shape=0, dtype=numba.float32)
+    # if (thread_cost_shared.shape[0]!=num_grid_samples_d):
+    #   print("WARNING: shared array doesn't have the correct size. thread_cost_shared.shape[0]=",thread_cost_shared.shape[0],
+    #   ", num_grid_samples=",num_grid_samples_d," Return")
+
+    # ---- From here on, any original tid should be replaced with for grid_i from start_grid_i to end_grid_i
+    for i in range(start_grid_i, end_grid_i):
+      thread_cost_shared[i] = 0.0
+    cuda.syncthreads() # Sync before moving on
+
+    # Explicit unicycle update and map lookup
+    # From here on we assume grid is properly padded so map lookup remains valid
+    # height, width = lin_sample_grid_batch_d[tid].shape
+    
+
+    for gi in range(start_grid_i, end_grid_i):
+      # Reset the initial state
+      x_curr = cuda.local.array(3, numba.float32)
+      for i in range(3):
+        x_curr[i] = x0_d[i]
+      
+      goal_reached = False
+      goal_tolerance_d2 = goal_tolerance_d*goal_tolerance_d
+      dist_to_goal2 = 1e9
+      v_nom = v_noisy = w_nom = w_noisy = 0.0
+
+      lin_ratio = 0.01*(lin_bin_values_bounds_d[1]-lin_bin_values_bounds_d[0])
+      ang_ratio = 0.01*(ang_bin_values_bounds_d[1]-ang_bin_values_bounds_d[0])
+      
+      for t in range(len(u_cur_d)):
+        # Look up the traction parameters from map
+        xi = numba.int32((x_curr[0]-xlimits_d[0])//res_d)
+        yi = numba.int32((x_curr[1]-ylimits_d[0])//res_d)
+
+        vtraction = lin_bin_values_bounds_d[0]+lin_ratio*lin_sample_grid_batch_d[gi, yi, xi]
+        wtraction = ang_bin_values_bounds_d[0]+ang_ratio*ang_sample_grid_batch_d[gi, yi, xi]
+
+        # Nominal noisy control
+        v_nom = u_cur_d[t, 0] + noise_samples_d[bid, t,0]
+        w_nom = u_cur_d[t, 1] + noise_samples_d[bid, t,1]
+        v_noisy = max(vrange_d[0], min(vrange_d[1], v_nom))
+        w_noisy = max(wrange_d[0], min(wrange_d[1], w_nom))
+        
+        # Forward simulate
+        x_curr[0] += dt_d*vtraction*v_noisy*math.cos(x_curr[2])
+        x_curr[1] += dt_d*vtraction*v_noisy*math.sin(x_curr[2])
+        x_curr[2] += dt_d*wtraction*w_noisy
+
+        dist_to_goal2 = (xgoal_d[0]-x_curr[0])**2 + (xgoal_d[1]-x_curr[1])**2
+        thread_cost_shared[gi] += stage_cost(dist_to_goal2, dt_d, dist_weight_d)
+        # thread_cost_shared[gi] += lambda_weight_d*(
+        #         (u_cur_d[t,0]/(u_std_d[0]**2))*noise_samples_d[bid,t,0] + (u_cur_d[t,1]/(u_std_d[1]**2))*noise_samples_d[bid,t, 1])
+        
+        # Separate obstacle and unknown cost
+        thread_cost_shared[gi] += obstacle_map_d[yi, xi]*obs_cost_d
+        thread_cost_shared[gi] += unknown_map_d[yi, xi]*unknown_cost_d
+        
+
+        if dist_to_goal2<= goal_tolerance_d2:
+          goal_reached = True
+          break
+      
+      
+      for t in range(len(u_cur_d)):
+        thread_cost_shared[gi] += lambda_weight_d*(
+          (u_cur_d[t,0]/(u_std_d[0]**2))*noise_samples_d[bid,t,0] + (u_cur_d[t,1]/(u_std_d[1]**2))*noise_samples_d[bid,t, 1])
+      
+      # Accumulate terminal cost 
+      thread_cost_shared[gi] += term_cost(dist_to_goal2, v_post_rollout_d, goal_reached)
+
+    # Only need to sync after all grid samples assigned to this thread have been finished.
+    # Next we'll reduce thread_cost_shared to a single value (mean or CVaR)
+    cuda.syncthreads()  # make sure all threads have produced costs
+
+
+    # ----------- New sorting procedure -----------
+    if cvar_alpha_d<1:
+      # sort
+      for i in range(math.ceil(num_grid_samples_d/2)):
+        # Odd
+        for ri in range(repeat):
+          gi = tid + ri*num_threads
+          if (gi%2==0) and ((gi+1)!=num_grid_samples_d):
+            # Swap
+            temp = thread_cost_shared[gi]
+            thread_cost_shared[gi] = thread_cost_shared[gi+1]
+            thread_cost_shared[gi+1] = temp
+        cuda.syncthreads()
+
+        # Even
+        for ri in range(repeat):
+          gi = tid + ri*num_threads
+          if (gi%2==1) and ((gi+1)!=num_grid_samples_d):
+            # Swap
+            temp = thread_cost_shared[gi]
+            thread_cost_shared[gi] = thread_cost_shared[gi+1]
+            thread_cost_shared[gi+1] = temp
+        cuda.syncthreads()
+    # --------------------------------------------
+
+    # ------------- Mean reduction for alpha quantile -------------
+    numel = math.ceil(num_grid_samples_d*cvar_alpha_d)
+    s = 1
+    while s < numel:
+      for ri in range(repeat):
+        gi = tid + ri*num_threads
+        if (gi % (2 * s) == 0) and ((gi + s) < numel):
+          thread_cost_shared[gi] += thread_cost_shared[gi+s]
+      s *= 2
+      cuda.syncthreads()
+    # --------------------------------------------
+    
+    # After the loop, the zeroth  element contains the sum
+    if tid == 0:
+      costs_d[bid] = thread_cost_shared[0]/numel
+
+
+
 
   @staticmethod
   @cuda.jit(fastmath=True)
@@ -482,6 +744,7 @@ class MPPI_Numba(object):
           cvar_alpha_d, 
           x0_d, 
           dt_d,
+          dist_weight_d,
           noise_samples_d,
           u_cur_d,
           costs_d):
@@ -541,9 +804,9 @@ class MPPI_Numba(object):
       x_curr[2] += dt_d*wtraction*w_noisy
 
       dist_to_goal2 = (xgoal_d[0]-x_curr[0])**2 + (xgoal_d[1]-x_curr[1])**2
-      thread_cost_shared[tid] += stage_cost(dist_to_goal2, dt_d, DEFAULT_DIST_WEIGHT)
-      thread_cost_shared[tid] += lambda_weight_d*(
-              (u_cur_d[t,0]/(u_std_d[0]**2))*noise_samples_d[bid,t,0] + (u_cur_d[t,1]/(u_std_d[1]**2))*noise_samples_d[bid,t, 1])
+      thread_cost_shared[tid] += stage_cost(dist_to_goal2, dt_d, dist_weight_d)
+      # thread_cost_shared[tid] += lambda_weight_d*(
+      #         (u_cur_d[t,0]/(u_std_d[0]**2))*noise_samples_d[bid,t,0] + (u_cur_d[t,1]/(u_std_d[1]**2))*noise_samples_d[bid,t, 1])
       
       # Separate obstacle and unknown cost
       thread_cost_shared[tid] += obstacle_map_d[yi, xi]*obs_cost_d
@@ -553,6 +816,11 @@ class MPPI_Numba(object):
       if dist_to_goal2<= goal_tolerance_d2:
         goal_reached = True
         break
+
+    for t in range(timesteps):
+      thread_cost_shared[tid] += lambda_weight_d*(
+        (u_cur_d[t,0]/(u_std_d[0]**2))*noise_samples_d[bid,t,0] + (u_cur_d[t,1]/(u_std_d[1]**2))*noise_samples_d[bid,t, 1])
+      
     
     # Accumulate terminal cost 
     thread_cost_shared[tid] += term_cost(dist_to_goal2, v_post_rollout_d, goal_reached)
@@ -562,7 +830,7 @@ class MPPI_Numba(object):
 
     numel = block_width
     if cvar_alpha_d<1:
-      numel = math.ceil(block_width*cvar_alpha_d)
+      # numel = math.ceil(block_width*cvar_alpha_d)
       # --- CVaR requires sorting the elements ---
       # First sort the costs from descending order via parallel bubble sort
       # https://stackoverflow.com/questions/42620649/sorting-algorithm-with-cuda-inside-or-outside-kernels
@@ -621,9 +889,9 @@ class MPPI_Numba(object):
           goal_tolerance_d, 
           lambda_weight_d, 
           u_std_d, 
-          # cvar_alpha_d, # not used
           x0_d, 
           dt_d,
+          dist_weight_d,
           noise_samples_d,
           u_cur_d,
           costs_d):
@@ -678,9 +946,9 @@ class MPPI_Numba(object):
 
 
       dist_to_goal2 = (xgoal_d[0]-x_curr[0])**2 + (xgoal_d[1]-x_curr[1])**2
-      costs_d[bid]+=stage_cost(dist_to_goal2, dt_d, DEFAULT_DIST_WEIGHT)
-      costs_d[bid] += lambda_weight_d*(
-              (u_cur_d[t,0]/(u_std_d[0]**2))*noise_samples_d[bid, t,0] + (u_cur_d[t,1]/(u_std_d[1]**2))*noise_samples_d[bid, t, 1])
+      costs_d[bid]+=stage_cost(dist_to_goal2, dt_d, dist_weight_d)
+      # costs_d[bid] += lambda_weight_d*(
+      #         (u_cur_d[t,0]/(u_std_d[0]**2))*noise_samples_d[bid, t,0] + (u_cur_d[t,1]/(u_std_d[1]**2))*noise_samples_d[bid, t, 1])
 
       # Separate obstacle and unknown cost
       costs_d[bid] += obstacle_map_d[yi, xi]*obs_cost_d
@@ -692,6 +960,10 @@ class MPPI_Numba(object):
     
     # Accumulate terminal cost 
     costs_d[bid] += term_cost(dist_to_goal2, v_post_rollout_d, goal_reached)
+
+    for t in range(timesteps):
+      costs_d[bid] += lambda_weight_d*(
+        (u_cur_d[t,0]/(u_std_d[0]**2))*noise_samples_d[bid, t,0] + (u_cur_d[t,1]/(u_std_d[1]**2))*noise_samples_d[bid, t, 1])
 
 
 
@@ -717,9 +989,9 @@ class MPPI_Numba(object):
           goal_tolerance_d, 
           lambda_weight_d, 
           u_std_d, 
-          # cvar_alpha_d, # not used
           x0_d, 
           dt_d,
+          dist_weight_d,
           noise_samples_d,
           u_cur_d,
           costs_d):
@@ -782,9 +1054,9 @@ class MPPI_Numba(object):
       dist_to_goal2 = (xgoal_d[0]-x_curr[0])**2 + (xgoal_d[1]-x_curr[1])**2
       
       effective_speed = lin_bin_values_bounds_d[0]+lin_ratio*lin_risk_traction_map_d[0, yi, xi]
-      costs_d[bid]+= stage_cost(dist_to_goal2, dt_d/(effective_speed+1e-6), DEFAULT_DIST_WEIGHT)
-      costs_d[bid] += lambda_weight_d*(
-              (u_cur_d[t,0]/(u_std_d[0]**2))*noise_samples_d[bid, t,0] + (u_cur_d[t,1]/(u_std_d[1]**2))*noise_samples_d[bid, t, 1])
+      costs_d[bid]+= stage_cost(dist_to_goal2, dt_d/(effective_speed+1e-6), dist_weight_d)
+      # costs_d[bid] += lambda_weight_d*(
+      #         (u_cur_d[t,0]/(u_std_d[0]**2))*noise_samples_d[bid, t,0] + (u_cur_d[t,1]/(u_std_d[1]**2))*noise_samples_d[bid, t, 1])
 
       # Separate obstacle and unknown cost
       costs_d[bid] += obstacle_map_d[yi, xi]*obs_cost_d
@@ -797,6 +1069,9 @@ class MPPI_Numba(object):
     # Accumulate terminal cost 
     costs_d[bid] += term_cost(dist_to_goal2, v_post_rollout_d, goal_reached)
 
+    for t in range(timesteps):
+      costs_d[bid] += lambda_weight_d*(
+              (u_cur_d[t,0]/(u_std_d[0]**2))*noise_samples_d[bid, t,0] + (u_cur_d[t,1]/(u_std_d[1]**2))*noise_samples_d[bid, t, 1])
 
   @staticmethod
   @cuda.jit(fastmath=True)

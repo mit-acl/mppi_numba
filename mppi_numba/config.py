@@ -4,7 +4,7 @@ gpu = cuda.get_current_device()
 max_threads_per_block = gpu.MAX_THREADS_PER_BLOCK
 max_square_block_dim = (int(gpu.MAX_BLOCK_DIM_X**0.5), int(gpu.MAX_BLOCK_DIM_X**0.5))
 max_blocks = gpu.MAX_GRID_DIM_X
-rec_max_control_rollouts = 3000 # Though theoretically limited by max_blocks on GPU
+max_rec_blocks = rec_max_control_rollouts = 15000 # Though theoretically limited by max_blocks on GPU
 rec_min_control_rollouts = 100
 
 class Config:
@@ -49,16 +49,37 @@ class Config:
     self.dt = dt
     self.num_steps = int(T/dt)
     assert self.num_steps > 0
+
+    self.max_threads_per_block = max_threads_per_block # save just in case
     
-    # Currently limited by the threads in a block (<=1024)
+
+    # TODO: update the config such that slow-down warning is issued for num_grid_samples>max_threads_per_block
+
+    # # Currently limited by the threads in a block (<=1024)
+    # self.num_grid_samples = num_grid_samples
+    # if self.num_grid_samples > max_threads_per_block:
+    #   self.num_grid_samples = min([max_threads_per_block, self.num_grid_samples])
+    #   print("MPPI Config: Currently limited by the threads in a block (<={})".format(max_threads_per_block))
+    # elif self.num_grid_samples < 1:
+    #   self.num_grid_samples = 1
+    #   print("MPPI Config: Set num_grid_samples from {} -> 1. Need at least 1 map to work with".format(num_grid_samples))
+    
+
+    if num_grid_samples > max_threads_per_block:
+      print("WARNING: slow-down expected since each thread needs to handle multiple rollouts due to num_grid_samples({})>max_threads_per_block({})".format(
+        num_grid_samples, max_threads_per_block
+      ))
+
     self.num_grid_samples = num_grid_samples
-    if self.num_grid_samples > max_threads_per_block:
-      self.num_grid_samples = min([max_threads_per_block, self.num_grid_samples])
-      print("MPPI Config: Currently limited by the threads in a block (<={})".format(max_threads_per_block))
+    if self.num_grid_samples > max_rec_blocks:
+      self.num_grid_samples = min([max_rec_blocks, self.num_grid_samples])
+      print("MPPI Config: Limit num_grid_samples by recommended max block number (<={}). But this can be overwritten if needed.".format(max_rec_blocks))
     elif self.num_grid_samples < 1:
       self.num_grid_samples = 1
       print("MPPI Config: Set num_grid_samples from {} -> 1. Need at least 1 map to work with".format(num_grid_samples))
     
+
+
     # Number of control rollouts are currently limited by the number of blocks
     self.num_control_rollouts = num_control_rollouts
     if self.num_control_rollouts > rec_max_control_rollouts:
