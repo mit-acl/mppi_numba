@@ -1,8 +1,42 @@
-# numba_mppi
+# Numba implementation of Model Predictive Path Integral (MPPI) Control with Probabilistic Traction Model
+
+High-level overview of the project. Mention the original MPPI algorithm, model choice, and mention the ICRA paper & IROS paper. (Expected traction can be used too, similar to WayFAST that uses the expected traction parameters based on environment.)
+
+Visualization for the traction grid representation.
+
+Notes on how to use nominal traction & how to include obstacles and unknown space (pass separate mask to the planner. Configure the cost in the MPPI file.)
+
+Visualization for the padding technique to avoid bound checking in GPU kernel.
+
+Recommanded tutorial on Numba to familiarize with GPU architecture and kernels before adapting the code.
+
+If people just want to run the planner (or reproduce the benchmark results) point to different jupyter notebooks.
 
 
 
-## Getting started
+Mention that, for ease of maintenance, the code base includes the core functionality that enables planning over a traction distribution map. 
+
+
+## Software setup
+
+Configure virtual environment (numpy, numba, jupyter notebook, pandas, )
+
+Check the GPU configuration by running test scripts below....
+
+
+
+## Breakdown of the file structure and the purpose of each file.
+
+Also explain the purpose of each jupyter notebook.
+
+
+## What papers to cite if the code is useful
+
+
+## License info 
+
+
+
 
 To make it easy for you to get started with GitLab, here's a list of recommended next steps.
 
