@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+"""
+Utils for generating samples from a made-up density such as Gaussian mixture
+"""
 import numpy as np
 
 

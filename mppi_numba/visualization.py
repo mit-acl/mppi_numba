@@ -1,12 +1,15 @@
 #!/usr/bin/env python3
+"""
+Utils for visualizing semantic maps
+"""
 import numpy as np
 import copy
 import matplotlib.pyplot as plt
 from matplotlib.collections import LineCollection, PolyCollection
-from matplotlib.patches import Ellipse
 
 class TDM_Visualizer(object):
 
+    """Visualizer for a given traction distribution map."""
 
     PREFERRED_MAX_FIG_WIDTH = 12
     PREFERRED_MAX_FIG_HEIGHT = 8
@@ -42,8 +45,6 @@ class TDM_Visualizer(object):
         
         # If padded, create new semantic_grid and update color (using black?)
         self.pad_width = tdm.pad_cells
-
-
 
         return_v = tdm.get_padded_grid_xy_dim()
         assert return_v is not None, "Cannot get padded grid dimension from TDM."
@@ -159,6 +160,8 @@ class TDM_Visualizer(object):
 
 
 def vis_density(ax, density, terrain, vis_cvar_alpha=0.3, show_cvar=False, color='b', show_legend=True, title=None, hist_alpha=0.5, fontsize=12):
+    """Visualization function for a given density."""
+
     cvar, thres = density.cvar(alpha=vis_cvar_alpha)
     if density.sample_initialized:
         ax.hist(density.samples, bins=100, density=True, color=color, alpha=hist_alpha, label=terrain.name)
@@ -178,6 +181,7 @@ def vis_density(ax, density, terrain, vis_cvar_alpha=0.3, show_cvar=False, color
     return ax
 
 def vis_density_as_pmf(ax, density, terrain, num_bins, include_min_max=True, color='b', title=None, hist_alpha=0.5):
+    """Visualization function for a given density approximated as PMF."""
     values, pmf = density.get_pmf(num_bins=num_bins, include_min_max=include_min_max)
     markerline, stemlines, baseline  = ax.stem(values, pmf, label=terrain.name)
     markerline.set_color(color)

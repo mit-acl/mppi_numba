@@ -1,5 +1,11 @@
 #!/usr/bin/env python3
+"""
+Configuration for initializing MPPI_Numba and TDM_Numba objects, containing useful info for initializing GPU memory.
+"""
+
 from numba import cuda
+
+# Information about your GPU
 gpu = cuda.get_current_device()
 max_threads_per_block = gpu.MAX_THREADS_PER_BLOCK
 max_square_block_dim = (int(gpu.MAX_BLOCK_DIM_X**0.5), int(gpu.MAX_BLOCK_DIM_X**0.5))
@@ -9,7 +15,7 @@ rec_min_control_rollouts = 100
 
 class Config:
   
-  # Configurations that are typically fixed throughout execution
+  """ Configurations that are typically fixed throughout execution. """
   
   def __init__(self, 
                T=10, # Horizon (s)
@@ -38,12 +44,7 @@ class Config:
     assert dt > 0
     assert T > dt
     assert not (num_true==0 or num_true>1), "MPPI Config Error: Only one of the use_tdm, use_det_dynamics, use_nom_dynamics_with_speed_map, use_costmap can be true."
-    # if num_true==0 or num_true>1:
-    #   print("MPPI Config: Only one of the use_tdm, use_det_dynamics, use_nom_dynamics_with_speed_map, use_costmap can be true. Use default use_tdm=true")
-    #   self.use_tdm = True
-    #   self.use_det_dynamics = False
-    #   self.use_nom_dynamics_with_speed_map = False
-    #   self.use_costmap = False
+    assert not self.use_costmap, "Interface with costmap2d is not yet implemented."
 
     self.T = T
     self.dt = dt
@@ -51,22 +52,10 @@ class Config:
     assert self.num_steps > 0
 
     self.max_threads_per_block = max_threads_per_block # save just in case
-    
 
-    # TODO: update the config such that slow-down warning is issued for num_grid_samples>max_threads_per_block
-
-    # # Currently limited by the threads in a block (<=1024)
-    # self.num_grid_samples = num_grid_samples
-    # if self.num_grid_samples > max_threads_per_block:
-    #   self.num_grid_samples = min([max_threads_per_block, self.num_grid_samples])
-    #   print("MPPI Config: Currently limited by the threads in a block (<={})".format(max_threads_per_block))
-    # elif self.num_grid_samples < 1:
-    #   self.num_grid_samples = 1
-    #   print("MPPI Config: Set num_grid_samples from {} -> 1. Need at least 1 map to work with".format(num_grid_samples))
-    
 
     if num_grid_samples > max_threads_per_block:
-      print("WARNING: slow-down expected since each thread needs to handle multiple rollouts due to num_grid_samples({})>max_threads_per_block({})".format(
+      print("WARNING: slow-down expected since each thread needs to handle multiple grid samples due to num_grid_samples({})>max_threads_per_block({})".format(
         num_grid_samples, max_threads_per_block
       ))
 
@@ -78,8 +67,6 @@ class Config:
       self.num_grid_samples = 1
       print("MPPI Config: Set num_grid_samples from {} -> 1. Need at least 1 map to work with".format(num_grid_samples))
     
-
-
     # Number of control rollouts are currently limited by the number of blocks
     self.num_control_rollouts = num_control_rollouts
     if self.num_control_rollouts > rec_max_control_rollouts:
