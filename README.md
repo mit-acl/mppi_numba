@@ -163,3 +163,13 @@ This software, was created by Xiaoyi Cai under Army Research Laboratory
 awarding agency, reserves a royalty-free, nonexclusive and irrevocable right
 to reproduce, publish, or otherwise use this software for Federal purposes,
 and to authorize others to do so in accordance with 2 CFR 200.315(b).
+
+
+# TODOs
+- [ ] Update the paper to include link to the github repo that includes video and code (before making public)
+- [ ] Wait for arxiv approval and get link to the arxiv paper
+- [ ] Update the arxiv link and paper bibtex in the repo
+- [ ] Update Youtube video description with arxiv link and link to the github repo
+- [ ] Make Youtube video public on ACl Youtube channel
+- [ ] Remove this check list
+- [ ] Make github repo public 
