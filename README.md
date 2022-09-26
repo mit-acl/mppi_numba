@@ -2,9 +2,16 @@
 
 A GPU implementation of [Model Predictive Path Integral (MPPI) control proposed by Williams et al.](https://ieeexplore.ieee.org/document/7989202) that uses a probabilistic traversability model (proposed in **ADD link to paper**) to plan risk-aware trajectories. The code leverages the Just-in-Time (JIT) compilation offered by [Numba](https://numba.pydata.org/) in Python to parallelize the sampling procedure (both for the control rollouts and the traction maps) on GPU. Although the implementation focuses on the unicycle model whose state consists of the x, y positions and yaw, the code may be adapted for higher dimensional system.
 
-The proposed probabilistic traversability model is represented as a 3D tensor with shape `(num_pmf_bins, height, width)`, where the last two dimensions correspond to the x and y dimensions in real world, and the first dimension contains PMF bins used to approximate the location-dependent parameter distribution. To use the knowledge about the **uncertainty** in traversability, the proposed planners try to reduce the **risk** of obtaining low performance via the following two approaches:
+The proposed probabilistic traversability model is represented as a 3D tensor with shape `(num_pmf_bins, height, width)`, where the last two dimensions correspond to the x and y dimensions in real world, and the first dimension contains PMF bins used to approximate the location-dependent parameter distribution. 
+To use the knowledge about the **uncertainty** in traversability, the proposed planners try to reduce the **risk** of obtaining low performance via the following two approaches (see the figure below for intuition):
 * For a given control sequence, the worst-case expectation of the cost (i.e., the Conditional Value at Risk) is computed over `M` traction map samples, where the worst-case quantile is specified by a hyperparameter.
 * The worst-case traction parameters are obtained based on the PMF approximations and used to generate state rollouts from given control sequences. This approach is more efficient, since it simulates the worst-case state realizations instead of directly estimating the worst-case expected objective from samples.
+
+<p align="center">
+    <img src="media/sim_tractions_legend.png" height="200" alt="schematic for proposed planners" />
+    <img src="media/cost_evaluation.png" height="210" alt="schematic for proposed planners" />
+</p>
+
 
 ## Video
 Please watch the video for an overview of how to learn a probabilitic traversability model that can be used to plan risk-aware trajectories by the code availbale in this repo. Note that the repo only includes the core functionalities for running MPPI with the proposed probabilistic traversability models for a unicycle, due to limited Numba support for object-oriented programming when the code has to be launched as GPU kernels. 
