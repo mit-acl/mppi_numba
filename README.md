@@ -146,7 +146,7 @@ tdm.set_TDM_from_PMF_grid(nominal_pmf_grid, tdm_params)
 
 3. **How to integrate the planner with ROS?**
   * For rospy, the planner and traversability model can be constructed like the what's done in the notebook examples.
-  * For roscpp, it is possible to use pybind11 to start a Python interpretor in cpp and construct the proposed planner and traversabilit model, though with large overhead.
+  * For roscpp, it is possible to use pybind11 to start a Python interpretor in cpp and construct the proposed planner and traversability model, though with large overhead.
 
 4. **Why do the probability masses in the bins sum up to 100 and are represented as `int8`?**
   * This is for performance reasons. It is faster to query values with smaller size like `int8` on GPU than larger ones like `float32`.

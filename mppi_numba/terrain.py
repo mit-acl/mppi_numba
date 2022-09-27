@@ -4,7 +4,7 @@ Class definitions for "Terrain", "TDM_Numba", and "TractionGrid".
 
 "TDM_Numba": Traction Distribution Map (TDM) implemented using numba, including core functions 
     for sampling traction maps, representing worst-case expected tractions, and more.
-    The underlyin pmf_grid has shape (num_bins, height, width), where at each location, bins sum up to 100 (int8).
+    The underlying pmf_grid has shape (num_bins, height, width), where at each location, bins sum up to 100 (int8).
 
 "TractionGrid": Deterministic traction map, typically sampled from TDM_Numba for simulation / visualization. 
     Can be used for simulating fixed but unknown terrain tractions from a ground truth distribution.
