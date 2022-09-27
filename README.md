@@ -158,7 +158,7 @@ tdm.set_TDM_from_PMF_grid(nominal_pmf_grid, tdm_params)
 
 ## Acknowledgement
 
-This software, was created by Xiaoyi Cai under Army Research Laboratory
+This software, was created by MIT Aerospace Controls Lab under Army Research Laboratory
 (ARL) Cooperative Agreement Number W911NF-21-2-0150.  ARL, as the Federal
 awarding agency, reserves a royalty-free, nonexclusive and irrevocable right
 to reproduce, publish, or otherwise use this software for Federal purposes,
