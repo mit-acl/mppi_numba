@@ -46,18 +46,15 @@ If you find this code useful, please consider citing our papers:
 
 
 ## Getting started
-The code was only tested on Ubuntu 20.04 with Python 3.8.10.
+The code was only tested on Ubuntu 20.04 with Python 3.8.10. The PC used had Intel I9 CPU and Nvidia GeForce RTX 3070. Browser used for the notebooks was Chrome.
 
 ### Dependencies 
 1. Check GPUs supported by Numba and install CUDA toolkit according to [Numba documentation](https://numba.readthedocs.io/en/stable/cuda/overview.html#requirements).
-2. Optionally create a python3 virtual environment
-```python
+2. Create a python3 virtual environment and install dependencies.
+```
+sudo apt install python3.8-venv
 python3 -m venv venv
 source venv/bin/activate
-```
-3. In the virtual env, install dependencies:
-
-```
 pip3 install numba pandas scipy scikit-learn matplotlib notebook
 
 # Expose the current venv to be accessible to jupyter notebook
@@ -65,7 +62,7 @@ pip3 install numba pandas scipy scikit-learn matplotlib notebook
 ipython kernel install --user --name=venv
 ```
 
-* Once successful, run the following to obtain GPU information as a sanity check:
+* Once successful, start a python3 session and run the following to obtain GPU information as a sanity check. There should be no error message.
 
 ```python
 from numba import cuda
@@ -89,14 +86,19 @@ print("pciDeviceID = %s" % str(gpu.PCI_DEVICE_ID))
 ```
 
 ### Example jupyter notebooks
-The repo provides a few jupyter notebooks with examples of how to use the provided functionalities. To run an example right away, try the `test.ipynb` 
-notebook. To reproduce the benchmark example in **INSERT LINK TO PAPER**, run `benchmark.ipynb` and visualize the result in `benchmark_vis.ipynb`.
 
-Please start the jupyter notebook server in the root directory of the cloned repo and select the configured virtual environment. Jupyter notebook server can be started with
+Please start the jupyter notebook server within the venv in the root directory of the cloned repo:
 ```
 cd PROJECT_ROOT_DIR # Go to root folder of cloned repo 
 jupyter notebook    # Start jupyter notebook server
 ```
+
+
+
+
+The repo provides a few jupyter notebooks with examples of how to use the provided functionalities. To run an example right away, try the `test.ipynb` notebook. To reproduce the benchmark example in **INSERT LINK TO PAPER**, run `benchmark.ipynb` and visualize the result in `benchmark_vis.ipynb`.
+
+\* **Note: In the menu of an opened notebook, click "Kernel"-->"Change kernel"-->"venv" to configure the kernel. This only has to be done and saved once per notebook.**
 
 **Overview of the notebooks**:
 1. `test.ipynb`: Initialization of a custom semantic environment with ground truth traction distributions. The MPPI planner uses the traction distribution to plan risk-aware trajectories to reach goals.
@@ -110,13 +112,15 @@ An example of deploying the proposed planner using a learned traction model in a
  
  ![](media/real_world_map_example.gif)
 
-
-## Adapting the code
-
-If you are interested in adapting the code and want to learn more about Numba, please follow the [documentation and recommended tutorials](https://numba.readthedocs.io/en/stable/cuda/overview.html) offered by Numba for CUDA GPUs. The knowledge about blocks and threads on GPU is useful. On a high level:
+## Planner configurations
+On a high level:
 * When `use_tdm=True`, the planner has to sample both `N` control sequences and `M` traction maps. In this case, `N` blocks are used to compute costs for each control sequence, and `M` threads within each block are used to produce `M` cost realizations over `M` sampled traction maps. A single cost value is produced by each block via parallel reduction. If `M>num_max_threads_per_block` is true, each thread handles multiple traction maps, which is not efficient with the current implementation. However, block synchronization can be implemented to address this issue by using multiple blocks (and their threads) to compute a cost value for a given control sequence.
 * When `use_det_dynamics=True`, the planner only samples `N` control sequences over `N` blocks on GPU. A single traction map that corresponds to the worst-case expected tractions is used by all the blocks. 
 * When `use_nom_dynamics_with_speed_map=True`, the planner only samples `N` control sequences over `N` blocks on GPU. A single traction map that corresponds to the nominal traction is used by all the blocks. A separate map is used to store worst-case linear traction in order to adjust the time cost in MPPI.
+
+## Adapting the code
+
+If you are interested in adapting the code and want to learn more about Numba, please follow the [documentation and recommended tutorials](https://numba.readthedocs.io/en/stable/cuda/overview.html) offered by Numba for CUDA GPUs. The knowledge about blocks and threads on GPU is useful. 
 
 Although ideally the code should leverage object-oriented programming to support different dynamical systems, [many Python features (including class definitions) are not supported by Numba for CUDA GPUs](https://numba.readthedocs.io/en/stable/cuda/cudapysupported.html). Therefore, the repo only implements a unicycle model for ground vehicle. However, by modifying the kernels for forward propagating dynamics and the traction distribution map (by providing PMFs for different model parameters), the code can be used for other dynamical systems as well. 
 
@@ -154,7 +158,8 @@ tdm.set_TDM_from_PMF_grid(nominal_pmf_grid, tdm_params)
 5. **What's the purpose of padding when constructing traction models in the `TDM_Numba` object?**
   * For motion planning, it is critical to check whether states fall within the valid regions of the map. However, this involves many if statements which are very slow on GPU. Therefore, we enlarge the nominal map by padding the sides with cells that have 0 traction. As a result, during forward propagation, the simulated state will be "trapped" in the padded cells at the boundary without leading to invalid memory queries. This trick  led to about 75% time reduction during development.
 
-
+6. **Warning: "NumbaPerformanceWarning: Grid size 1 will likely result in GPU under-utilization due to low occupancy"**
+  * For certain steps in the proposed planners, using multiple GPU grids are not required. Numba issues this warning only once, which can be safely ignored.
 
 ## Acknowledgement
 
