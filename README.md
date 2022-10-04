@@ -1,6 +1,6 @@
 # MPPI_Numba
 
-A GPU implementation of [Model Predictive Path Integral (MPPI) control proposed by Williams et al.](https://ieeexplore.ieee.org/document/7989202) that uses a probabilistic traversability model (proposed in **ADD link to paper**) to plan risk-aware trajectories. The code leverages the Just-in-Time (JIT) compilation offered by [Numba](https://numba.pydata.org/) in Python to parallelize the sampling procedure (both for the control rollouts and the traction maps) on GPU. Although the implementation focuses on the unicycle model whose state consists of the x, y positions and yaw, the code may be adapted for higher dimensional system.
+A GPU implementation of [Model Predictive Path Integral (MPPI) control proposed by Williams et al.](https://ieeexplore.ieee.org/document/7989202) that uses a probabilistic traversability model (proposed in "[Probabilistic Traversability Model for Risk-Aware Motion Planning in Off-Road Environments](https://arxiv.org/abs/2210.00153)") to plan risk-aware trajectories. The code leverages the Just-in-Time (JIT) compilation offered by [Numba](https://numba.pydata.org/) in Python to parallelize the sampling procedure for both control rollouts and traction maps on GPU. Although the implementation focuses on the unicycle model whose state consists of the x, y positions and yaw, the code may be adapted for higher dimensional system.
 
 The proposed probabilistic traversability model is represented as a 3D tensor with shape `(num_pmf_bins, height, width)`, where the last two dimensions correspond to the x and y dimensions in real world, and the first dimension contains PMF bins used to approximate the location-dependent parameter distribution. 
 To use the knowledge about the **uncertainty** in traversability, the proposed planners try to reduce the **risk** of obtaining low performance via the following two approaches (see the figure below for intuition):
@@ -23,16 +23,16 @@ Please watch the video for an overview of how to learn a probabilitic traversabi
 
 ## Citation
 If you find this code useful, please consider citing our papers:
-* X. Cai, M. Everett, L. Sharma, P. R. Osteen, and J. P. How, **ADD LINK TO PAPER, ADD ARXIV INFO**
+* X. Cai, M. Everett, L. Sharma, P. R. Osteen, and J. P. How, "[Probabilistic Traversability Model for Risk-Aware Motion Planning in Off-Road Environments](https://arxiv.org/abs/2210.00153)" arXiv:2210.00153, 2022.
 
-* X. Cai, M. Everett, J. Fink, and J. P. How, “[Risk-Aware Off-Road Navigation via a Learned Speed Distribution Map.](https://arxiv.org/abs/2203.13429?context=cs)” arXiv, Mar. 24, 2022. doi: 10.48550/arXiv.2203.13429.
+* X. Cai, M. Everett, J. Fink, and J. P. How, “[Risk-Aware Off-Road Navigation via a Learned Speed Distribution Map.](https://arxiv.org/abs/2203.13429)” arXiv:2203.13429, 2022.
 
 
 ```bibtex
 @article{cai2022probabilistic,
   title={Probabilistic Traversability Model for Risk-Aware Motion Planning in Off-Road Environments},
   author={Cai, Xiaoyi and Everett, Michael and Sharma, Lakshay and Osteen, Philip R and How, Jonathan P},
-  eprint={???????????????????????????????????????????????????????????},
+  eprint={arXiv:2210.00153},
   year={2022}
 }
 
@@ -93,24 +93,19 @@ cd PROJECT_ROOT_DIR # Go to root folder of cloned repo
 jupyter notebook    # Start jupyter notebook server
 ```
 
-
-
-
-The repo provides a few jupyter notebooks with examples of how to use the provided functionalities. To run an example right away, try the `test.ipynb` notebook. To reproduce the benchmark example in **INSERT LINK TO PAPER**, run `benchmark.ipynb` and visualize the result in `benchmark_vis.ipynb`.
-
 \* **Note: In the menu of an opened notebook, click "Kernel"-->"Change kernel"-->"venv" to configure the kernel. This only has to be done and saved once per notebook.**
 
 **Overview of the notebooks**:
 1. `test.ipynb`: Initialization of a custom semantic environment with ground truth traction distributions. The MPPI planner uses the traction distribution to plan risk-aware trajectories to reach goals.
 2. `planner_example_vis_gif.ipynb`: Animation of the proposed planners can be generated as `.gif` files. Some examples can already be found in `./example_gifs` folder. An example of the proposed planner that uses samples of traction maps:
 
-![](media/planner_example.gif)
+<img src="media/planner_example.gif" height="300" alt="planner example gif" />
 
-3. `benchmark.ipynb`: Code for generating the benchmark figures for different algorithms in **INSERT PAPER TITLE and LINK**. The notebook is currently configured to run fewer trials than what's done in the paper. The output pickle file is saved in `./mppi_benchmark` folder. The nicely formatted plot can be generated in `benchmark_vis.ipynb`.
-4. `confidence_score_example_vis.ipynb`: The notebook visualizes the effect of an unfamiliar terrain detector based on Gaussian Mixture Model (GMM) proposed in **INSERT PAPER TITLE and LINK**. The code also demonstrates how to use PMF predictions instead of ground truth distribution to construct the traction distribution map. The example is built based on real world data (height map also available in the pickle files). Pre-generated predictions (from some neural network) for terrain tractions will be loaded from the `./tdm_models` in order to simulate traction realizations from the learned distributions. 
+3. `benchmark.ipynb`: Code for generating the benchmark figures for different algorithms in "[Probabilistic Traversability Model for Risk-Aware Motion Planning in Off-Road Environments](https://arxiv.org/abs/2210.00153)". The notebook is currently configured to run fewer trials than what's done in the paper. The output pickle file is saved in `./mppi_benchmark` folder. The nicely formatted plot can be generated in `benchmark_vis.ipynb`.
+4. `confidence_score_example_vis.ipynb`: The notebook visualizes the effect of an unfamiliar terrain detector based on Gaussian Mixture Model (GMM) proposed in "[Probabilistic Traversability Model for Risk-Aware Motion Planning in Off-Road Environments](https://arxiv.org/abs/2210.00153)". The code also demonstrates how to use PMF predictions instead of ground truth distribution to construct the traction distribution map. The example is built based on real world data (height map also available in the pickle files). Pre-generated predictions (from some neural network) for terrain tractions will be loaded from the `./tdm_models` in order to simulate traction realizations from the learned distributions. 
 An example of deploying the proposed planner using a learned traction model in an unseen environment:
  
- ![](media/real_world_map_example.gif)
+ <img src="media/real_world_map_example.gif" height="300" alt="real world map example gif" />
 
 ## Planner configurations
 On a high level:
@@ -168,13 +163,3 @@ This software, was created by MIT Aerospace Controls Lab under Army Research Lab
 awarding agency, reserves a royalty-free, nonexclusive and irrevocable right
 to reproduce, publish, or otherwise use this software for Federal purposes,
 and to authorize others to do so in accordance with 2 CFR 200.315(b).
-
-
-# TODOs
-- [ ] Update the paper to include link to the github repo that includes video and code (before making public)
-- [ ] Wait for arxiv approval and get link to the arxiv paper
-- [ ] Update the arxiv link and paper bibtex in the repo
-- [ ] Update Youtube video description with arxiv link and link to the github repo
-- [ ] Make Youtube video public on ACl Youtube channel
-- [ ] Remove this check list
-- [ ] Make github repo public 
