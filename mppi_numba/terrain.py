@@ -4,7 +4,7 @@ Class definitions for "Terrain", "TDM_Numba", and "TractionGrid".
 
 "TDM_Numba": Traction Distribution Map (TDM) implemented using numba, including core functions 
     for sampling traction maps, representing worst-case expected tractions, and more.
-    The underlying pmf_grid has shape (num_bins, height, width), where at each location, bins sum up to 100 (int8).
+    The underlyin pmf_grid has shape (num_bins, height, width), where at each location, bins sum up to 100 (int8).
 
 "TractionGrid": Deterministic traction map, typically sampled from TDM_Numba for simulation / visualization. 
     Can be used for simulating fixed but unknown terrain tractions from a ground truth distribution.
@@ -166,6 +166,7 @@ class TDM_Numba(object):
             t0 = time.time()
             
             ## Allocate more than needed space to account for varying map size (crop if larger than expected)
+            ## Note that uninitialized values are not necessarily 0.
             rows, cols = self.max_map_dim
         
             if not self.det_dyn:
@@ -434,12 +435,13 @@ class TDM_Numba(object):
 
             else:
                 # Find up to which bins the CVaR values should be computed
-                upto_which_layer_to_compute_cvar = np.argmax(pmf_cumsum<=tdm_dict["det_dynamics_cvar_alpha"], axis=0)
+                # upto_which_layer_to_compute_cvar = np.argmax(pmf_cumsum<=tdm_dict["det_dynamics_cvar_alpha"], axis=0)
+                upto_which_layer_to_compute_cvar = np.argmax(pmf_cumsum>=tdm_dict["det_dynamics_cvar_alpha"], axis=0)
                 l_indices_to_compute_cvar = upto_which_layer_to_compute_cvar.ravel()
                 # Compute the CVaR by dividing the total mass of the worst-percentiles
                 cvars = (weighted_v_cumsum[l_indices_to_compute_cvar, r_indices, c_indices] / \
-                    pmf_cumsum[l_indices_to_compute_cvar, r_indices, c_indices]).reshape((num_rows, num_cols))
-                
+                    (pmf_cumsum[l_indices_to_compute_cvar, r_indices, c_indices]+1e-6)).reshape((num_rows, num_cols))
+
                 # Find the bins that approximate this CVaR
                 which_layer = np.argmax(cvars <=self.bin_values.reshape((-1, 1, 1)), axis=0)
                 l_indices = which_layer.ravel()
@@ -482,7 +484,7 @@ class TDM_Numba(object):
                 r_indices = np.repeat(np.arange(num_rows), num_cols)
                 c_indices = np.tile(np.arange(num_cols), num_rows)
                 # Conditional mean
-                cvars = weighted_v_cumsum[l_indices, r_indices, c_indices] / pmf_cumsum[l_indices, r_indices, c_indices].ravel()
+                cvars = weighted_v_cumsum[l_indices, r_indices, c_indices] / (pmf_cumsum[l_indices, r_indices, c_indices].ravel()+1e-6)
                 risk_traction_map = np.reshape(
                     100*np.asarray((cvars.reshape(num_rows, num_cols)-self.bin_values_bounds[0])/traction_range),
                     (1,num_rows,num_cols)).astype(np.int8)
@@ -678,8 +680,7 @@ class TDM_Numba(object):
             for ci in range(ci_start, ci_end):
                 # Check which bin this belongs to
                 rand_num = xoroshiro128p_uniform_float32(rng_states_d, thread_id)
-                # sampled_cum_pmf = np.int8(round(rand_num*100.0))
-                sampled_cum_pmf = np.int8(round(rand_num*100.0*alpha_dyn)) # sample the worst alpha-percentile
+                sampled_cum_pmf = np.int8(math.ceil(rand_num*100.0*alpha_dyn))
                 cum_pmf = np.int8(0)
                 for bi in range(num_bins):
                     cum_pmf += pmf_grid_d[bi, ri, ci]
