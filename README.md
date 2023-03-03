@@ -36,11 +36,13 @@ If you find this code useful, please consider citing our papers:
   year={2022}
 }
 
-@article{cai2022risk,
-  title={Risk-Aware Off-Road Navigation via a Learned Speed Distribution Map},
+@inproceedings{cai2022risk,
+  title={Risk-aware off-road navigation via a learned speed distribution map},
   author={Cai, Xiaoyi and Everett, Michael and Fink, Jonathan and How, Jonathan P},
-  eprint={arXiv:2203.13429},
-  year={2022}
+  booktitle={2022 IEEE/RSJ International Conference on Intelligent Robots and Systems (IROS)},
+  pages={2931--2937},
+  year={2022},
+  organization={IEEE}
 }
 ```
 
@@ -163,3 +165,5 @@ This software, was created by MIT Aerospace Controls Lab under Army Research Lab
 awarding agency, reserves a royalty-free, nonexclusive and irrevocable right
 to reproduce, publish, or otherwise use this software for Federal purposes,
 and to authorize others to do so in accordance with 2 CFR 200.315(b).
+
+This software was also sponsored by ONR grant N00014-18-1-2832.
