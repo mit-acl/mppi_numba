@@ -25,7 +25,10 @@ Please watch the video for an overview of how to learn a probabilitic traversabi
 If you find this code useful, please consider citing our papers:
 * X. Cai, M. Everett, L. Sharma, P. R. Osteen, and J. P. How, "[Probabilistic Traversability Model for Risk-Aware Motion Planning in Off-Road Environments](https://arxiv.org/abs/2210.00153)" arXiv:2210.00153, 2022.
 
-* X. Cai, M. Everett, J. Fink, and J. P. How, “[Risk-Aware Off-Road Navigation via a Learned Speed Distribution Map.](https://arxiv.org/abs/2203.13429)” arXiv:2203.13429, 2022.
+* X. Cai, M. Everett, J. Fink, and J. P. How, “Risk-aware off-road
+navigation via a learned speed distribution map,” in 2022 IEEE/RSJ
+International Conference on Intelligent Robots and Systems (IROS).
+IEEE, 2022, pp. 2931–2937. [[arXiv link](https://arxiv.org/abs/2203.13429)][[IEEE Xplore link](https://ieeexplore.ieee.org/document/9982200)]
 
 
 ```bibtex
