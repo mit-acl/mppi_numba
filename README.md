@@ -1,3 +1,6 @@
+Updates (2023/03/31):
+* If you are looking for a Numba implementation of MPPI on GPU without terrain-dependent dynamics, check the newly added  `barebone_mppi_numba.ipynb`. 
+
 # MPPI_Numba
 
 A GPU implementation of [Model Predictive Path Integral (MPPI) control proposed by Williams et al.](https://ieeexplore.ieee.org/document/7989202) that uses a probabilistic traversability model (proposed in "[Probabilistic Traversability Model for Risk-Aware Motion Planning in Off-Road Environments](https://arxiv.org/abs/2210.00153)") to plan risk-aware trajectories. The code leverages the Just-in-Time (JIT) compilation offered by [Numba](https://numba.pydata.org/) in Python to parallelize the sampling procedure for both control rollouts and traction maps on GPU. Although the implementation focuses on the unicycle model whose state consists of the x, y positions and yaw, the code may be adapted for higher dimensional system.
@@ -101,6 +104,8 @@ jupyter notebook    # Start jupyter notebook server
 \* **Note: In the menu of an opened notebook, click "Kernel"-->"Change kernel"-->"venv" to configure the kernel. This only has to be done and saved once per notebook.**
 
 **Overview of the notebooks**:
+
+0. `barebone_mppi_numba.ipynb`: A standalone, barebone implementation of MPPI with Numba without notion of traction distribution.
 1. `test.ipynb`: Initialization of a custom semantic environment with ground truth traction distributions. The MPPI planner uses the traction distribution to plan risk-aware trajectories to reach goals.
 2. `planner_example_vis_gif.ipynb`: Animation of the proposed planners can be generated as `.gif` files. Some examples can already be found in `./example_gifs` folder. An example of the proposed planner that uses samples of traction maps:
 
@@ -127,7 +132,8 @@ Although ideally the code should leverage object-oriented programming to support
 ## FAQs
 
 1. **How to run MPPI with nominal unicycle dynamics without a probabilistic traction model?**
-  * The easiest way with the existing interface for traction distribution map is to use the `set_TDM_from_PMF_grid(...)` method for constructing a `TDM_Numba` object defined in `mppi_numba/terrain.py`. For a more detailed example, see the `confidence_score_example_vis.ipynb`. The following is the pseudocode that can be used:
+  * Check the example notebook `barebone_mppi_numba.ipynb` for an implementation with nominal unicycle dynamics.
+  * Alternatively, the easiest way with the existing interface for traction distribution map is to use the `set_TDM_from_PMF_grid(...)` method for constructing a `TDM_Numba` object defined in `mppi_numba/terrain.py`. For a more detailed example, see the `confidence_score_example_vis.ipynb`. The following is the pseudocode that can be used:
 
 ```python
 tdm = TDM_Numba(...) # Pass in proper cfg to initialize GPU memory
