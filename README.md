@@ -26,7 +26,12 @@ Please watch the video for an overview of how to learn a probabilitic traversabi
 
 ## Citation
 If you find this code useful, please consider citing our papers:
-* X. Cai, M. Everett, L. Sharma, P. R. Osteen, and J. P. How, "[Probabilistic Traversability Model for Risk-Aware Motion Planning in Off-Road Environments](https://arxiv.org/abs/2210.00153)" arXiv:2210.00153, 2022.
+* X. Cai, S. Ancha, L. Sharma, P. R. Osteen, B. Bucher, S. Phillips, J. Wang, M. Everett, N. Roy, and J. P. How, “EVORA: Deep Evidential Traversability Learning for Risk-Aware Off-Road Autonomy,” IEEE Transactions on Robotics, vol. 40, pp. 3756–3777, 2024. [[arXiv link](https://arxiv.org/abs/2311.06234)][[IEEE Xplore link](https://ieeexplore.ieee.org/abstract/document/10606099)]
+
+
+* X. Cai, M. Everett, L. Sharma, P. R. Osteen, and J. P. How, "Probabilistic Traversability Model for Risk-Aware Motion Planning in Off-Road Environments," in 2023 IEEE/RSJ
+International Conference on Intelligent Robots and Systems (IROS).
+IEEE, 2023, pp. 11297-11304. [[arXiv link](https://arxiv.org/abs/2210.00153)][[IEEE Xplore link](https://ieeexplore.ieee.org/document/10341350)]
 
 * X. Cai, M. Everett, J. Fink, and J. P. How, “Risk-aware off-road
 navigation via a learned speed distribution map,” in 2022 IEEE/RSJ
@@ -35,15 +40,27 @@ IEEE, 2022, pp. 2931–2937. [[arXiv link](https://arxiv.org/abs/2203.13429)][[I
 
 
 ```bibtex
-@article{cai2022probabilistic,
-  title={Probabilistic Traversability Model for Risk-Aware Motion Planning in Off-Road Environments},
+@article{cai2024evora,
+  title={{EVORA: Deep Evidential Traversability Learning for Risk-Aware Off-Road Autonomy}},
+  author={Cai, Xiaoyi and Ancha, Siddharth and Sharma, Lakshay and Osteen, Philip R and Bucher, Bernadette and Phillips, Stephen and Wang, Jiuguang and Everett, Michael and Roy, Nicholas and How, Jonathan P},
+  journal={IEEE Transactions on Robotics},
+  volume={40},
+  pages={3756-3777},
+  year={2024},
+  publisher={IEEE}
+}
+
+@inproceedings{cai2023probabilistic,
+  title={{Probabilistic Traversability Model for Risk-Aware Motion Planning in Off-Road Environments}},
   author={Cai, Xiaoyi and Everett, Michael and Sharma, Lakshay and Osteen, Philip R and How, Jonathan P},
-  eprint={arXiv:2210.00153},
-  year={2022}
+  booktitle={2023 IEEE/RSJ International Conference on Intelligent Robots and Systems (IROS)},
+  pages={11297--11304},
+  year={2023},
+  organization={IEEE}
 }
 
 @inproceedings{cai2022risk,
-  title={Risk-aware off-road navigation via a learned speed distribution map},
+  title={{Risk-Aware Off-Road Navigation via a Learned Speed Distribution Map}},
   author={Cai, Xiaoyi and Everett, Michael and Fink, Jonathan and How, Jonathan P},
   booktitle={2022 IEEE/RSJ International Conference on Intelligent Robots and Systems (IROS)},
   pages={2931--2937},
